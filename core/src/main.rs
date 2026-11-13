@@ -38,6 +38,10 @@ fn print_help() {
 }
 
 fn main() -> Result<()> {
+    anyhow::ensure!(
+        env::var_os("GITHUB_ACTIONS").is_none(),
+        "PearlMiner execution is disabled in GitHub Actions; run on the local Mac"
+    );
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print_help();
@@ -47,8 +51,21 @@ fn main() -> Result<()> {
     match args[0].as_str() {
         "daemon" => run_daemon(),
         "self-test" | "--self-test" => {
+            let expected = match args.as_slice() {
+                [_] => None,
+                [_, flag, kernel] if flag == "--expect-kernel" => Some(kernel),
+                _ => bail!("usage: self-test [--expect-kernel NAME]"),
+            };
             let report = run_self_test()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            if let Some(expected) = expected {
+                anyhow::ensure!(
+                    &report.kernel_name == expected,
+                    "Kernel selection regression: expected {}, got {}",
+                    expected,
+                    report.kernel_name
+                );
+            }
             Ok(())
         }
         "benchmark" | "--benchmark" => {

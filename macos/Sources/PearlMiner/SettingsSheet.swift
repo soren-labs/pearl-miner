@@ -159,12 +159,17 @@ struct SettingsSheet: View {
 
     private func commitChanges() -> Bool {
         var next = draft
-        guard let p = Int(portText), (1...65535).contains(p),
-              let e = Double(electricityText), e.isFinite, e >= 0 else {
+        guard let e = Double(electricityText), e.isFinite, e >= 0 else {
             validationError = vm.l10n.invalidSettings
             return false
         }
-        next.customPort = p
+        if next.pool == .custom {
+            guard let p = Int(portText), (1...65535).contains(p) else {
+                validationError = vm.l10n.invalidSettings
+                return false
+            }
+            next.customPort = p
+        }
         next.electricityUsdPerKwh = e
         let trimmedWorker = next.worker.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedWorker.isEmpty {

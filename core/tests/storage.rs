@@ -36,7 +36,10 @@ fn replacing_wallet_preserves_the_original_key_and_private_permissions() {
         .collect();
     assert_eq!(backups.len(), 1);
     let saved = load_and_verify_wallet(&backups[0]).unwrap();
-    assert_eq!(saved.private_key_hex, old.private_key_hex);
+    assert!(
+        saved.private_key_hex == old.private_key_hex,
+        "Backed-up key must match the original"
+    );
     for f in [p, backups[0].clone()] {
         assert_eq!(fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
     }
