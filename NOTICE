@@ -1,0 +1,19 @@
+PearlMiner
+Copyright 2026 soren-labs and contributors
+
+Licensed under the Apache License, Version 2.0.
+
+This product includes software and cryptographic components from the following third-party projects:
+
+1. pearl-metal-miner (Apache-2.0)
+   Upstream Metal GPU PoW kernels (`csrc/metal/`) and Pearl Stratum mining research.
+
+2. pearl-research-labs/pearl (`pearl-blake3`, `zk-pow`) — ISC License
+   Vendored under `vendor/pearl/pearl-blake3` and `vendor/pearl/zk-pow`.
+   Copyright (c) Pearl Research Labs
+
+3. 0xPolygonZero/plonky2 (forked at pearl-research-labs/plonky2) — MIT OR Apache-2.0
+   Vendored under `vendor/pearl/plonky2`.
+
+4. AppleSMC / IOReport macOS power telemetry methodology
+   Inspired by macpowdata and Apple IOKit/IOReport open diagnostics research.

@@ -1,0 +1,24 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# Swift / macOS build artifacts
+macos/.build/
+.build/
+*.xcodeproj
+*.xcworkspace
+
+# Release packaging outputs
+dist/
+
+# Sensitive user data (never commit wallets or local miner config)
+wallet.json
+*wallet*.json
+config.json
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.log
