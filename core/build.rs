@@ -3,6 +3,11 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
+    assert!(
+        env::var_os("GITHUB_ACTIONS").is_none(),
+        "PearlMiner builds and tests must run on the local Mac, not GitHub Actions"
+    );
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let metal_dir = manifest_dir.join("../csrc/metal");
     let msl_path = metal_dir.join("kernels/pearl_kernels.metal");

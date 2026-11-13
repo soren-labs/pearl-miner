@@ -2,8 +2,8 @@
 
 **早期预览版。** 验证结果及已知限制见 [更新记录](CHANGELOG.md)。（珍珠币 Mac GPU 挖矿工具）
 
-[![Build](https://github.com/soren-labs/pearl-miner/actions/workflows/ci.yml/badge.svg)](https://github.com/soren-labs/pearl-miner/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/soren-labs/pearl-miner)](https://github.com/soren-labs/pearl-miner/releases)
+**编译与验证仅在本机 Mac 执行。**
+[![Release](https://img.shields.io/github/v/release/soren-labs/pearl-miner?include_prereleases)](https://github.com/soren-labs/pearl-miner/releases)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
@@ -79,3 +79,10 @@ cargo test -p pearl-miner-core
 强度、电价、空闲及电池策略、防休眠配置会即时应用。修改矿池、钱包、矿工名或 CPU 线程数前需停止挖矿。
 
 正式签名、公证和 GitHub 凭据配置，以及本地 GPU 回归测试的运行方法，见 [英文文档](README.md#developer-id-signing-and-notarization)。未配置签名证书的发布将标记为预发布版。
+
+
+## 本地 CI 与发布
+
+运行 `./scripts/ci_local.sh`，在本机完成 Rust 测试、严格 lint、原生打包、GPU 自检、M6 内核选择检查、本地模拟矿池回归以及安装包完整性检查。默认不连接公共矿池挖矿。
+
+GitHub 托管的构建、测试和发布工作流已移除并停用。GitHub 仅托管代码与本机生成后上传的安装包，不在其托管 Mac 中运行内核。签名及公证凭据保留在本机钥匙串；上传未公证成品时标记为预发布。详见 [AGENTS.md](AGENTS.md)。

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — Portable Metal runtime detection
+
+- Keep M6 tensor-kernel detection in binaries built with older SDKs. Metal 4.1 is gated by runtime macOS/GPU support rather than preprocessed out by the build SDK; ABI values are checked against newer SDK headers. Older Macs retain the scalar fallback.
+- Honor the sleep-prevention toggle: Metal activity tokens suppress App Nap without unconditionally blocking idle system sleep.
+- Remove and disable GitHub-hosted build/test/release workflows. All verification and packaging run locally via `scripts/ci_local.sh`; build/runtime guards refuse GitHub Actions environments, and GitHub only receives prebuilt artifacts.
+- Validate custom ports only when a custom pool is selected.
+- v0.1.1 remains functionally correct but its CI-built binary falls back to the slower scalar kernel on M6. Use 0.1.2 for the M6 tensor path.
+
 ## 0.1.1 — Reliability preview
 
 - Correct live network hashrate parsing (`net_hashrate`), fetch current block rewards and observed intervals, and remove unscaled difficulty conversions and silent historical market assumptions. Missing/stale data hides earnings; partial or failed balance responses stay unknown.

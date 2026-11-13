@@ -1,7 +1,7 @@
 # PearlMiner
 
-[![Build](https://github.com/soren-labs/pearl-miner/actions/workflows/ci.yml/badge.svg)](https://github.com/soren-labs/pearl-miner/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/soren-labs/pearl-miner)](https://github.com/soren-labs/pearl-miner/releases)
+**Build and validation run only on the local Mac.**
+[![Release](https://img.shields.io/github/v/release/soren-labs/pearl-miner?include_prereleases)](https://github.com/soren-labs/pearl-miner/releases)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
@@ -124,6 +124,26 @@ python3 scripts/smoke_test.py
 
 ## Developer ID signing and notarization
 
-Local signing uses `PEARL_CODESIGN_IDENTITY` (a Developer ID Application identity in the keychain) and `PEARL_NOTARY_PROFILE` (credentials previously stored by `xcrun notarytool store-credentials`). With both configured, `./scripts/build_app.sh 0.1.1` signs both executables with hardened runtime, notarizes and staples the app and DMG, then creates final checksums. Notarization failures stop packaging.
+Local signing uses `PEARL_CODESIGN_IDENTITY` (a Developer ID Application identity in the keychain) and `PEARL_NOTARY_PROFILE` (credentials previously stored by `xcrun notarytool store-credentials`). With both configured, `./scripts/build_app.sh 0.1.2` signs both executables with hardened runtime, notarizes and staples the app and DMG, then creates final checksums. Notarization failures stop packaging.
 
-For GitHub Releases, configure these repository secrets: `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `MACOS_CODESIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`. The workflow imports credentials into a temporary runner keychain and removes it afterward. Without a signing certificate, releases are explicitly marked **prerelease** and remain ad-hoc signed. See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+GitHub-hosted build/test/release workflows are removed and disabled. Keep signing/notarization credentials in your local keychain. Run `./scripts/ci_local.sh` locally, then upload the resulting DMG, ZIP and `SHA256SUMS.txt` with `gh release create` or the GitHub release UI. Publishing uploads prebuilt files; it does not execute the miner on GitHub. Unsigned artifacts must be marked **prerelease**. See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+
+
+### Verify the selected M6 kernel
+
+On an M6 running macOS 27+, verify **the downloaded release binary**, not just a local source build:
+
+```bash
+PearlMiner.app/Contents/MacOS/pearl-miner-core self-test --expect-kernel pow_sweep_m6_tensor
+```
+
+This check fails if the math passes on the slower scalar fallback. Older Macs should run `self-test` without an expected-kernel constraint. Metal 4.1 availability is detected at runtime even when the app is built using older SDK headers.
+
+
+### Local CI
+
+```bash
+./scripts/ci_local.sh
+```
+
+This runs formatting, Rust tests, strict Clippy, native packaging, GPU self-checks (including expected M6 tensor selection), the simulated localhost-pool regression, signature/integrity checks and release checksums. No public mining is run by default. All computation stays on the local Mac. Do not add GitHub-hosted miner workflows. See [AGENTS.md](AGENTS.md) for the repository execution policy.

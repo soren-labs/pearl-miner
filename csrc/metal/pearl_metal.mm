@@ -30,6 +30,17 @@ const char *const kKernelNames[kNumKernels] = {
     "pow_sweep_v2", "pow_sweep_m6_simd", "pow_sweep_m6_tensor",
 };
 
+// These are enum ABI values, not new linked symbols. Keep runtime detection
+// available when a distributable is built against an older SDK (as on CI).
+// The OS and GPU checks below still gate every use of Metal 4.1.
+constexpr MTLGPUFamily kApple11Family = static_cast<MTLGPUFamily>(1011);
+constexpr MTLLanguageVersion kMetalLanguage4_1 =
+    static_cast<MTLLanguageVersion>((4 << 16) + 1);
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
+static_assert(kApple11Family == MTLGPUFamilyApple11, "Metal GPU family ABI changed");
+static_assert(kMetalLanguage4_1 == MTLLanguageVersion4_1, "Metal language ABI changed");
+#endif
+
 struct PowParams {
   uint32_t n_row_bases;
   uint32_t n_col_bases;
@@ -75,10 +86,11 @@ pm_ctx *pm_create(char *err, size_t errlen) {
     ctx->profile_enabled = profile && std::strcmp(profile, "0") != 0;
     // Without this, macOS App Nap suspends an unattended background miner
     // after a minute — measured: full speed for ~30 s, then near-total stall.
-    // UserInitiated disables App Nap and idle system sleep; LatencyCritical
-    // also disables timer throttling. Held for the context's lifetime.
+    // Suppress App Nap and timer throttling while allowing idle system sleep.
+    // The Rust session's keep_awake policy owns the sleep assertion.
     ctx->activity = [[NSProcessInfo processInfo]
-        beginActivityWithOptions:(NSActivityUserInitiated | NSActivityLatencyCritical)
+        beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep |
+                                  NSActivityLatencyCritical)
                           reason:@"pearl-metal-miner mining"];
     ctx->queue = [ctx->device newCommandQueue];
     ctx->dummy = [ctx->device newBufferWithLength:16
@@ -160,17 +172,15 @@ int pm_compile(pm_ctx *ctx, const pm_shape *shape, char *err, size_t errlen) {
         std::strcmp(kernel_request, "auto") == 0 || std::strcmp(kernel_request, "scalar") == 0;
     const char *disable_m6 = std::getenv("PEARL_METAL_DISABLE_M6");
     const bool matrices_disabled = disable_m6 && std::strcmp(disable_m6, "0") != 0;
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
     if (@available(macOS 27.0, *)) {
       ctx->matrices_available = !matrices_disabled &&
-          [ctx->device supportsFamily:MTLGPUFamilyApple11];
+          [ctx->device supportsFamily:kApple11Family];
       if (ctx->matrices_available) {
-        opts.languageVersion = MTLLanguageVersion4_1;
+        opts.languageVersion = kMetalLanguage4_1;
         opts.preprocessorMacros = @{@"PEARL_M6_EXPERIMENTAL_MATRICES": @1,
             @"PEARL_M6_TENSOR_SIMDGROUPS": @(ctx->tensor_simdgroups)};
       }
     }
-#endif
     // IEEE fp32 semantics are load-bearing: the fast-path GEMM accumulates
     // chunk partials (integers < 2^24) in fp32 FMA, exactly, only because
     // fast-math is off. The self-test enforces the resulting bit-exactness.
@@ -191,7 +201,6 @@ int pm_compile(pm_ctx *ctx, const pm_shape *shape, char *err, size_t errlen) {
 #endif
     NSError *nserr = nil;
     id<MTLLibrary> lib = [ctx->device newLibraryWithSource:src options:opts error:&nserr];
-#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 270000
     // A new OS/compiler can reject an optional matrix source. Auto mode must
     // retain the original scalar kernels; an explicitly forced mode fails.
     if (!lib && ctx->matrices_available && allow_matrix_fallback) {
@@ -200,7 +209,6 @@ int pm_compile(pm_ctx *ctx, const pm_shape *shape, char *err, size_t errlen) {
       opts.languageVersion = MTLLanguageVersion3_1;
       lib = [ctx->device newLibraryWithSource:src options:opts error:&nserr];
     }
-#endif
     if (!lib) {
       set_err(err, errlen, [NSString stringWithFormat:@"MSL compile failed: %@",
                                                       nserr.localizedDescription]);
