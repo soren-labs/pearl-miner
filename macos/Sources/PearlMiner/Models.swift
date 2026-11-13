@@ -62,8 +62,6 @@ struct MinerConfig: Codable, Equatable {
     var cpuThreads: Int
     var electricityUsdPerKwh: Double
     var liveMarketSync: Bool
-    var fallbackPrlPriceUsd: Double
-    var fallbackNetworkHashrateEhs: Double
 
     enum CodingKeys: String, CodingKey {
         case language
@@ -79,8 +77,6 @@ struct MinerConfig: Codable, Equatable {
         case cpuThreads = "cpu_threads"
         case electricityUsdPerKwh = "electricity_usd_per_kwh"
         case liveMarketSync = "live_market_sync"
-        case fallbackPrlPriceUsd = "fallback_prl_price_usd"
-        case fallbackNetworkHashrateEhs = "fallback_network_hashrate_ehs"
     }
 
     static let `default` = MinerConfig(
@@ -96,13 +92,12 @@ struct MinerConfig: Codable, Equatable {
         keepAwake: true,
         cpuThreads: 4,
         electricityUsdPerKwh: 0.15,
-        liveMarketSync: true,
-        fallbackPrlPriceUsd: 1.40,
-        fallbackNetworkHashrateEhs: 35.0
+        liveMarketSync: true
     )
 }
 
 struct WalletSummary: Codable, Equatable {
+    var needsBackup: Bool
     var address: String
     var mode: String
     var hasPrivateKey: Bool
@@ -110,6 +105,7 @@ struct WalletSummary: Codable, Equatable {
     var path: String
 
     enum CodingKeys: String, CodingKey {
+        case needsBackup = "needs_backup"
         case address
         case mode
         case hasPrivateKey = "has_private_key"
@@ -149,6 +145,9 @@ struct PowerReading: Codable, Equatable {
 }
 
 struct EconomicsSnapshot: Codable, Equatable {
+    var earningsAvailable: Bool
+    var usdAvailable: Bool
+    var feeIncluded: Bool
     var prlPerDay: Double
     var prlPerMonth: Double
     var grossUsdPerDay: Double
@@ -161,6 +160,9 @@ struct EconomicsSnapshot: Codable, Equatable {
     var isLiveMarket: Bool
 
     enum CodingKeys: String, CodingKey {
+        case earningsAvailable = "earnings_available"
+        case usdAvailable = "usd_available"
+        case feeIncluded = "fee_included"
         case prlPerDay = "prl_per_day"
         case prlPerMonth = "prl_per_month"
         case grossUsdPerDay = "gross_usd_per_day"
@@ -182,6 +184,13 @@ struct MarketAndPoolSnapshot: Codable, Equatable {
     var poolPaidPrl: Double?
     var poolThresholdPrl: Double?
     var lastUpdatedUtc: String?
+    var walletAddress: String?
+    var fetchedAtUnix: UInt64?
+
+    var isFresh: Bool {
+        guard let fetchedAtUnix, fetchedAtUnix > 0 else { return false }
+        return Date().timeIntervalSince1970 - Double(fetchedAtUnix) <= 180
+    }
 
     enum CodingKeys: String, CodingKey {
         case prlPriceUsd = "prl_price_usd"
@@ -191,6 +200,8 @@ struct MarketAndPoolSnapshot: Codable, Equatable {
         case poolPaidPrl = "pool_paid_prl"
         case poolThresholdPrl = "pool_threshold_prl"
         case lastUpdatedUtc = "last_updated_utc"
+        case walletAddress = "wallet_address"
+        case fetchedAtUnix = "fetched_at_unix"
     }
 }
 

@@ -7,8 +7,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub const HRP: &str = "prl";
@@ -27,6 +27,12 @@ pub struct WalletFile {
     pub mode: WalletMode,
     #[serde(default)]
     pub note: String,
+    #[serde(default = "legacy_backup_confirmed")]
+    pub backup_confirmed: bool,
+}
+
+fn legacy_backup_confirmed() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -44,6 +50,7 @@ pub struct WalletSummary {
     pub has_private_key: bool,
     pub created_utc: String,
     pub path: String,
+    pub needs_backup: bool,
 }
 
 fn tagged_hash(tag: &str, data: &[u8]) -> [u8; 32] {
@@ -97,7 +104,10 @@ pub fn validate_payout_address(addr: &str) -> Result<String> {
         );
     }
     if program.len() != PROGRAM_BYTES {
-        bail!("decoded witness program has invalid length {}", program.len());
+        bail!(
+            "decoded witness program has invalid length {}",
+            program.len()
+        );
     }
     Ok(lower)
 }
@@ -149,6 +159,7 @@ pub fn generate_wallet_data() -> Result<WalletFile> {
                 internal_key_x_hex: Some(hex::encode(internal_x)),
                 created_utc: utc_now_iso(),
                 mode: WalletMode::FullKeypair,
+                backup_confirmed: false,
                 note: "Payout wallet created by PearlMiner. Keep the private key secret and backed up. To spend, import the private key into a taproot-capable tr() descriptor wallet.".to_string(),
             });
         }
@@ -156,10 +167,17 @@ pub fn generate_wallet_data() -> Result<WalletFile> {
 }
 
 pub fn wallet_from_private_key_hex(input: &str) -> Result<WalletFile> {
-    let clean = input.trim().strip_prefix("0x").or_else(|| input.trim().strip_prefix("0X")).unwrap_or(input.trim());
+    let clean = input
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| input.trim().strip_prefix("0X"))
+        .unwrap_or(input.trim());
     let bytes = hex::decode(clean).context("private key must be 64 hex characters")?;
     if bytes.len() != 32 {
-        bail!("private key must be exactly 32 bytes (64 hex chars), got {} bytes", bytes.len());
+        bail!(
+            "private key must be exactly 32 bytes (64 hex chars), got {} bytes",
+            bytes.len()
+        );
     }
     let arr: [u8; 32] = bytes.try_into().unwrap();
     let (norm_priv, internal_x, address) = derive_address_from_key_bytes(&arr)?;
@@ -169,6 +187,7 @@ pub fn wallet_from_private_key_hex(input: &str) -> Result<WalletFile> {
         internal_key_x_hex: Some(hex::encode(internal_x)),
         created_utc: utc_now_iso(),
         mode: WalletMode::FullKeypair,
+        backup_confirmed: true,
         note: "Imported into PearlMiner from private key.".to_string(),
     })
 }
@@ -181,34 +200,35 @@ pub fn wallet_from_watch_address(addr: &str) -> Result<WalletFile> {
         internal_key_x_hex: None,
         created_utc: utc_now_iso(),
         mode: WalletMode::WatchOnly,
+        backup_confirmed: true,
         note: "External payout address connected to PearlMiner (watch/payout only; private key is managed elsewhere).".to_string(),
     })
 }
 
 pub fn write_wallet_file(path: &Path, wallet: &WalletFile) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        crate::storage::private_dir(parent)?;
+    }
+    // Serialize replacement/backup across the desktop daemon and headless CLI.
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path.with_extension("json.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
     let json = serde_json::to_string_pretty(wallet)? + "\n";
-    let tmp = path.with_extension("json.tmp");
-    {
-        use std::io::Write;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all()?;
-    }
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    crate::storage::backup_existing_wallet(path)
+        .context("Cannot back up existing wallet; replacement cancelled")?;
+    crate::storage::atomic_write(path, json.as_bytes())
 }
 
 pub fn load_and_verify_wallet(path: &Path) -> Result<WalletFile> {
-    let raw = fs::read_to_string(path).with_context(|| format!("cannot read wallet file {}", path.display()))?;
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("cannot read wallet file {}", path.display()))?;
     let mut data: WalletFile = serde_json::from_str(&raw).context("invalid wallet.json format")?;
     data.address = validate_payout_address(&data.address)?;
     if let Some(ref pk_hex) = data.private_key_hex {
@@ -287,7 +307,10 @@ mod tests {
         );
 
         // Reject bitcoin prefix and invalid checksum
-        assert!(validate_payout_address("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0").is_err());
+        assert!(validate_payout_address(
+            "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+        )
+        .is_err());
         let mut corrupted = addr.clone();
         let last = corrupted.pop().unwrap();
         corrupted.push(if last == 'q' { 'p' } else { 'q' });

@@ -100,7 +100,7 @@ unsafe impl Send for SmcPowerReader {}
 impl SmcPowerReader {
     pub fn open() -> Option<Self> {
         unsafe {
-            let matching = IOServiceMatching(b"AppleSMC\0".as_ptr() as *const c_char);
+            let matching = IOServiceMatching(c"AppleSMC".as_ptr());
             if matching.is_null() {
                 return None;
             }
@@ -144,9 +144,11 @@ impl SmcPowerReader {
         if let Some(&cached) = self.key_info_cache.get(&key) {
             return Some(cached);
         }
-        let mut input = SmcKeyData::default();
-        input.key = key;
-        input.data8 = SMC_CMD_READ_KEYINFO;
+        let input = SmcKeyData {
+            key,
+            data8: SMC_CMD_READ_KEYINFO,
+            ..Default::default()
+        };
         let out = self.call(&input)?;
         self.key_info_cache.insert(key, out.key_info);
         Some(out.key_info)
@@ -158,10 +160,12 @@ impl SmcPowerReader {
         if info.data_size == 0 || info.data_size > 32 {
             return None;
         }
-        let mut input = SmcKeyData::default();
-        input.key = key;
-        input.data8 = SMC_CMD_READ_BYTES;
-        input.key_info = info;
+        let input = SmcKeyData {
+            key,
+            data8: SMC_CMD_READ_BYTES,
+            key_info: info,
+            ..Default::default()
+        };
         let out = self.call(&input)?;
         let val = match info.data_type {
             TYPE_FLT | TYPE_IOF => {
@@ -262,13 +266,7 @@ impl IoReportGpuReader {
                 return None;
             }
             let mut subd: CFMutableDictionaryRef = ptr::null_mut();
-            let sub = IOReportCreateSubscription(
-                ptr::null(),
-                desired,
-                &mut subd,
-                0,
-                ptr::null(),
-            );
+            let sub = IOReportCreateSubscription(ptr::null(), desired, &mut subd, 0, ptr::null());
             CFRelease(desired as CFTypeRef);
             if sub.is_null() || subd.is_null() {
                 if !subd.is_null() {
@@ -298,10 +296,7 @@ impl IoReportGpuReader {
                 return None;
             }
             let now = Instant::now();
-            let prev = self.prev_sample.replace((cur, now));
-            let Some((prev_dict, prev_ts)) = prev else {
-                return None;
-            };
+            let (prev_dict, prev_ts) = self.prev_sample.replace((cur, now))?;
             let dt_s = now.duration_since(prev_ts).as_secs_f64();
             let delta = IOReportCreateSamplesDelta(prev_dict, cur, ptr::null());
             CFRelease(prev_dict as CFTypeRef);
@@ -358,6 +353,10 @@ impl Drop for IoReportGpuReader {
                 CFRelease(self.subd as CFTypeRef);
                 self.subd = ptr::null_mut();
             }
+            if !self.sub.is_null() {
+                CFRelease(self.sub as CFTypeRef);
+                self.sub = ptr::null_mut();
+            }
         }
     }
 }
@@ -375,6 +374,12 @@ pub struct PowerTelemetry {
     ioreport: Option<IoReportGpuReader>,
 }
 
+impl Default for PowerTelemetry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PowerTelemetry {
     pub fn new() -> Self {
         Self {
@@ -386,7 +391,7 @@ impl PowerTelemetry {
     pub fn sample(&mut self, device_name: &str, intensity: u8) -> PowerReading {
         let sys_w = self.smc.as_mut().and_then(|s| s.read_system_watts());
         let gpu_w = self.ioreport.as_mut().and_then(|r| r.sample_gpu_watts());
-        let is_estimated = sys_w.is_none() && gpu_w.is_none();
+        let is_estimated = sys_w.is_none() || gpu_w.is_none();
         let fallback_gpu = crate::economics::gpu_watts_fallback(device_name, intensity);
         PowerReading {
             system_watts: sys_w.or(Some(fallback_gpu + 6.0)),

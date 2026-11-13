@@ -33,6 +33,8 @@ struct WalletSheet: View {
                 .keyboardShortcut(.cancelAction)
             }
 
+            if let error = vm.errorMessage { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if let notice = vm.walletNotice { Text(notice).font(.caption).foregroundStyle(.green) }
             if let wallet = vm.wallet {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -53,6 +55,10 @@ struct WalletSheet: View {
 
                     HStack(spacing: 8) {
                         Text(wallet.address)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .truncationMode(.middle)
+                            .help(wallet.address)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
                         Spacer()
@@ -66,6 +72,10 @@ struct WalletSheet: View {
                         .controlSize(.small)
                     }
 
+                    HStack(spacing: 10) {
+                        Button(l.exportBackup) { vm.exportWallet() }.controlSize(.small)
+                        Button(l.showWalletFiles) { vm.showWalletBackups() }.controlSize(.small)
+                    }
                     HStack(spacing: 10) {
                         if wallet.hasPrivateKey {
                             Button(vm.revealedPrivateKey == nil ? l.revealPrivateKey : l.hidePrivateKey) {
@@ -129,7 +139,7 @@ struct WalletSheet: View {
                         Text(l.importWalletFile).tag(SwitchMode.importFile)
                         Text(l.connectAddressOnly).tag(SwitchMode.addressOnly)
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                     .labelsHidden()
                     .disabled(vm.isMining)
 
@@ -193,6 +203,10 @@ struct WalletSheet: View {
         }
         .padding(20)
         .frame(width: 500)
+        .alert(l.replaceWalletTitle, isPresented: $vm.confirmWalletReplacement) {
+            Button(l.cancel, role: .cancel) { vm.cancelWalletReplacement() }
+            Button(l.replaceWallet, role: .destructive) { vm.replaceWalletConfirmed() }
+        } message: { Text(l.replaceWalletMessage) }
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.json],
@@ -211,10 +225,7 @@ struct WalletSheet: View {
         case .kryptexEu, .kryptexUs:
             return URL(string: "https://pool.kryptex.com/prl/miner/stats/\(address)")
         case .custom:
-            if vm.config.customDialect == .kryptex {
-                return URL(string: "https://pool.kryptex.com/prl/miner/stats/\(address)")
-            }
-            return URL(string: "https://pearl.luckypool.io/?wallet=\(address)")
+            return nil
         }
     }
 }

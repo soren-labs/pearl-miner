@@ -50,7 +50,7 @@ struct MainView: View {
                 Text(l.appName)
                     .font(.headline)
                 if let hw = vm.hardware {
-                    Text("\(hw.deviceName) · \(hw.kernelName.replacingOccurrences(of: "pow_sweep_", with: ""))")
+                    Text(hw.deviceName)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
@@ -96,6 +96,7 @@ struct MainView: View {
                 .font(.caption)
                 .lineLimit(2)
             Spacer()
+            if !vm.engineAvailable { Button(vm.l10n.retry) { vm.restartEngine() } }
             Button {
                 vm.errorMessage = nil
             } label: {
@@ -151,24 +152,13 @@ struct MainView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(vm.wallet == nil)
+                    .disabled(vm.wallet == nil || !vm.engineAvailable || vm.isRunningBenchmark || vm.isRunningSelfTest)
                 }
             }
 
             Divider().opacity(0.5)
 
             HStack(spacing: 14) {
-                Button {
-                    vm.showWalletSheet = true
-                } label: {
-                    Label(shortAddress(vm.wallet?.address), systemImage: "creditcard")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-
-                Text("·").foregroundStyle(.tertiary)
-
                 Button {
                     vm.showSettingsSheet = true
                 } label: {
@@ -231,25 +221,25 @@ struct MainView: View {
 
             // 2. Estimated Earnings
             MetricCard(title: l.estEarnings, icon: "dollarsign.circle.fill", accent: .green) {
-                if let econ = vm.economics, vm.equivThs > 0.001 {
+                if let econ = vm.economics, econ.earningsAvailable, vm.equivThs > 0.001 {
                     HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        Text(String(format: "$%.2f", econ.grossUsdPerDay))
+                        Text(econ.usdAvailable ? String(format: "$%.2f", econ.grossUsdPerDay) : String(format: "%.3f PRL", econ.prlPerDay))
                             .font(.system(size: 26, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                         Text(l.perDay)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(String(format: "%.2f PRL · %@ $%.2f", econ.prlPerDay, l.netAfterPower, econ.netUsdPerDay))
+                    Text(econ.usdAvailable ? String(format: "%.3f PRL · %@ $%.2f", econ.prlPerDay, l.netAfterPower, econ.netUsdPerDay) : l.assumedMarket)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                         .monospacedDigit()
                 } else {
                     Text("—")
                         .font(.system(size: 26, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
-                    if let price = vm.market.prlPriceUsd {
+                    if let price = vm.market.prlPriceUsd, vm.market.isFresh {
                         Text(String(format: "PRL $%.2f · %@", price, l.liveMarket))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -261,6 +251,8 @@ struct MainView: View {
                     }
                 }
             }
+
+            .help(l.earningsExplanation)
 
             // 3. System & GPU Power
             MetricCard(title: l.systemPower, icon: "gauge.with.needle.fill", accent: .orange) {
@@ -312,13 +304,13 @@ struct MainView: View {
                         .foregroundStyle(.secondary)
                     }
 
-                    let pending = vm.market.poolPendingPrl
-                    let confirmed = vm.market.poolConfirmedPrl
+                    let pending = vm.market.isFresh ? vm.market.poolPendingPrl : nil
+                    let confirmed = vm.market.isFresh ? vm.market.poolConfirmedPrl : nil
                     if pending != nil || confirmed != nil {
                         HStack(spacing: 12) {
-                            Text(String(format: "%@ %.4f PRL", l.pending, pending ?? 0))
+                            Text("\(l.pending) \(pending.map { String(format: "%.4f PRL", $0) } ?? "—")")
                                 .font(.subheadline.weight(.medium).monospacedDigit())
-                            Text(String(format: "%@ %.4f", l.confirmed, confirmed ?? 0))
+                            Text("\(l.confirmed) \(confirmed.map { String(format: "%.4f", $0) } ?? "—")")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }

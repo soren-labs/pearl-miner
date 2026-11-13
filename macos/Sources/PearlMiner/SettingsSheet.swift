@@ -7,6 +7,7 @@ struct SettingsSheet: View {
     @State private var draft: MinerConfig = .default
     @State private var portText: String = "3360"
     @State private var electricityText: String = "0.15"
+    @State private var validationError: String?
 
     var body: some View {
         let l = vm.l10n
@@ -19,14 +20,14 @@ struct SettingsSheet: View {
                     dismiss()
                 }
                 Button(l.save) {
-                    commitChanges()
-                    dismiss()
+                    if commitChanges() { dismiss() }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(18)
 
+            if let error = validationError ?? vm.errorMessage { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal, 18) }
             Divider()
 
             Form {
@@ -109,7 +110,7 @@ struct SettingsSheet: View {
                         } label: {
                             Text(vm.isRunningSelfTest ? l.runningSelfTest : l.runSelfTest)
                         }
-                        .disabled(vm.isRunningSelfTest || vm.isMining)
+                        .disabled(vm.isRunningSelfTest || vm.isRunningBenchmark || vm.isMining || !vm.engineAvailable)
 
                         Spacer()
 
@@ -117,7 +118,7 @@ struct SettingsSheet: View {
                             ProgressView().controlSize(.small)
                         } else if let report = vm.selfTestReport {
                             Label(
-                                "\(report.checksPassed)/\(report.checksPassed) · \(report.elapsedMs) ms",
+                                "\(report.passed ? "✓" : "✗") \(report.checksPassed) · \(report.elapsedMs) ms",
                                 systemImage: report.passed ? "checkmark.circle.fill" : "xmark.circle.fill"
                             )
                             .font(.caption)
@@ -131,7 +132,7 @@ struct SettingsSheet: View {
                         } label: {
                             Text(vm.isRunningBenchmark ? l.runningBenchmark : l.runBenchmark)
                         }
-                        .disabled(vm.isRunningBenchmark || vm.isMining)
+                        .disabled(vm.isRunningBenchmark || vm.isRunningSelfTest || vm.isMining || !vm.engineAvailable)
 
                         Spacer()
 
@@ -156,20 +157,24 @@ struct SettingsSheet: View {
         }
     }
 
-    private func commitChanges() {
+    private func commitChanges() -> Bool {
         var next = draft
-        if let p = Int(portText), p > 0, p <= 65535 {
-            next.customPort = p
+        guard let p = Int(portText), (1...65535).contains(p),
+              let e = Double(electricityText), e.isFinite, e >= 0 else {
+            validationError = vm.l10n.invalidSettings
+            return false
         }
-        if let e = Double(electricityText), e >= 0 {
-            next.electricityUsdPerKwh = e
-        }
+        next.customPort = p
+        next.electricityUsdPerKwh = e
         let trimmedWorker = next.worker.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedWorker.isEmpty {
             next.worker = vm.config.worker
         } else {
             next.worker = trimmedWorker
         }
-        vm.saveConfig(next)
+        if vm.saveConfig(next) { return true }
+        validationError = vm.errorMessage
+        vm.errorMessage = nil
+        return false
     }
 }

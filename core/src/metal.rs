@@ -249,7 +249,14 @@ impl MetalContext {
 
     pub fn compile(&self, shape: &PmShape) -> Result<()> {
         let mut err = [0 as c_char; 1024];
-        let rc = unsafe { pm_compile(self.ctx, shape as *const PmShape, err.as_mut_ptr(), err.len()) };
+        let rc = unsafe {
+            pm_compile(
+                self.ctx,
+                shape as *const PmShape,
+                err.as_mut_ptr(),
+                err.len(),
+            )
+        };
         if rc != 0 {
             bail!("Metal compile failed: {}", err_buf_to_string(&err));
         }
@@ -380,6 +387,7 @@ impl MetalContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the Metal C ABI.
     pub fn pow_sweep(
         &self,
         an: &MetalBuffer,
@@ -419,6 +427,7 @@ impl MetalContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the Metal C ABI.
     pub fn pow_sweep2(
         &self,
         an: &MetalBuffer,

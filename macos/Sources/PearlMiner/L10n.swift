@@ -38,6 +38,19 @@ struct L10n {
     var copied: String { t("Copied", "已复制") }
     var refresh: String { t("Refresh", "刷新") }
 
+    var engineStopped: String { t("The mining engine stopped. Retry to reconnect.", "挖矿引擎已停止，请重试连接。") }
+    var retry: String { t("Retry", "重试") }
+    var exportBackup: String { t("Export Wallet Backup…", "导出钱包备份…") }
+    var backupSaved: String { t("Wallet backup saved. Keep it private and store a copy off this Mac.", "钱包备份已保存。请保密，并在本机以外另存一份。") }
+    var showWalletFiles: String { t("Show Wallet Files", "显示钱包文件") }
+    var replaceWalletTitle: String { t("Replace payout wallet?", "替换收款钱包？") }
+    var replaceWalletMessage: String { t("The current wallet will be backed up in wallet-backups before replacement. Keep your own exported backup to retain access to previously mined PRL.", "替换前会自动将旧钱包保存到 wallet-backups 文件夹。请自行导出备份，以保留对原有 PRL 的访问权限。") }
+    var replaceWallet: String { t("Replace Wallet", "替换钱包") }
+    var backupAcknowledged: String { t("I have saved my private key or exported a wallet backup.", "我已保存私钥或导出钱包备份。") }
+    var importWalletDesc: String { t("Import an existing Pearl wallet.json file.", "导入已有的珍珠币 wallet.json 文件。") }
+    var earningsExplanation: String { t("An estimate from recent network hashrate, observed block interval and block reward, not a payout guarantee. Fees are included only when supplied by the pool API. Missing or stale data hides earnings.", "根据近期全网算力、观测出块间隔和区块奖励估算，不保证到账。仅在矿池 API 提供费率时扣除矿池费；数据缺失或过期时隐藏估算。") }
+    var invalidSettings: String { t("Check the pool hostname, port (1–65535), worker name and nonnegative electricity rate.", "请检查矿池主机、端口（1–65535）、矿工名及非负电价。") }
+
     // Onboarding
     var welcomeTitle: String { t("Start Mining Pearl (PRL)", "开始挖掘珍珠币 (PRL)") }
     var welcomeSubtitle: String {
@@ -50,8 +63,8 @@ struct L10n {
     var createNewWallet: String { t("Create New Wallet", "一键创建新钱包") }
     var createWalletDesc: String {
         t(
-            "Generates a local prl1p… Taproot keypair stored securely on your Mac (0600).",
-            "在本地生成 prl1p… Taproot 密钥对并加密级权限存储（0600）。"
+            "Creates a local payout wallet. Export a backup before mining; the wallet file is not encrypted.",
+            "在本机创建收款钱包。挖矿前请导出备份；钱包文件未加密。"
         )
     }
     var importPrivateKey: String { t("Import Private Key", "导入私钥") }
@@ -88,9 +101,9 @@ struct L10n {
     var netAfterPower: String { t("Net after power", "扣除电费净收益") }
     var gpuPowerLabel: String { t("GPU", "GPU") }
     var liveSensor: String { t("Live sensor", "实时传感器") }
-    var estimatedSensor: String { t("Chip estimate", "芯片估算") }
-    var liveMarket: String { t("Live price & diff", "实时币价与全网算力") }
-    var assumedMarket: String { t("Assumed rate", "参考估算") }
+    var estimatedSensor: String { t("Includes estimates", "含估算数据") }
+    var liveMarket: String { t("Live market data", "实时市场数据") }
+    var assumedMarket: String { t("Market data unavailable", "市场数据暂不可用") }
     var poolBalance: String { t("Pool Balance", "矿池余额") }
     var pending: String { t("Pending", "待确认") }
     var confirmed: String { t("Confirmed", "已确认") }
@@ -109,7 +122,7 @@ struct L10n {
     var walletTitle: String { t("Pearl Wallet", "珍珠币钱包") }
     var currentAddress: String { t("Payout Address", "收款地址") }
     var watchOnlyBadge: String { t("Address Only (External Key)", "仅收款地址（外部私钥）") }
-    var fullKeyBadge: String { t("Local Keypair (0600)", "本地密钥对 (0600)") }
+    var fullKeyBadge: String { t("Local Wallet", "本地钱包") }
     var revealPrivateKey: String { t("Reveal Private Key", "查看私钥") }
     var hidePrivateKey: String { t("Hide Private Key", "隐藏私钥") }
     var switchOrImport: String { t("Switch / Import Wallet", "切换或导入钱包") }

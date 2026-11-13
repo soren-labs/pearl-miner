@@ -21,12 +21,12 @@ use zk_pow::v1::api::verify as v1_verify;
 pub const SIGNAL_MIN: i8 = -64;
 pub const SIGNAL_MAX: i8 = 64;
 pub const SEED_LABEL_A: [u8; 32] = [
-    b'A', b'_', b't', b'e', b'n', b's', b'o', b'r', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0,
+    b'A', b'_', b't', b'e', b'n', b's', b'o', b'r', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
 ];
 pub const SEED_LABEL_B: [u8; 32] = [
-    b'B', b'_', b't', b'e', b'n', b's', b'o', b'r', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0,
+    b'B', b'_', b't', b'e', b'n', b's', b'o', b'r', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 #[derive(Clone, Debug)]
@@ -246,9 +246,7 @@ impl Grid {
         let tree_a = MerkleTree::new(&a_padded, identity.job_key);
         let hash_a = tree_a.root();
 
-        let b_reused = cached_b
-            .as_ref()
-            .is_some_and(|b| b.identity == identity);
+        let b_reused = cached_b.as_ref().is_some_and(|b| b.identity == identity);
 
         let b_state = if let Some(b) = cached_b.filter(|b| b.identity == identity) {
             b
@@ -376,6 +374,7 @@ pub struct GridFactory {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+#[allow(clippy::large_enum_variant)] // At most one prefetched build is queued.
 enum FactoryMsg {
     Build {
         shape: JobShape,
@@ -384,6 +383,12 @@ enum FactoryMsg {
         reply: Sender<Result<Grid>>,
     },
     Stop,
+}
+
+impl Default for GridFactory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GridFactory {
@@ -498,7 +503,11 @@ mod tests {
         let cases = [
             U256::from(1u64) << 224,
             (U256::from(0x00ab_cdefu64) << 210) + U256::from(12345u64),
-            U256::from_str_radix("00000000ffff0000000000000000000000000000000000000000000000000000", 16).unwrap(),
+            U256::from_str_radix(
+                "00000000ffff0000000000000000000000000000000000000000000000000000",
+                16,
+            )
+            .unwrap(),
         ];
         for t in cases {
             let nb = target_to_nbits(t);

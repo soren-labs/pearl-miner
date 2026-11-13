@@ -14,6 +14,8 @@ dist/
 # Sensitive user data (never commit wallets or local miner config)
 wallet.json
 *wallet*.json
+*wallet*.json.lock
+wallet-backups/
 config.json
 
 # OS / Editor
@@ -22,3 +24,7 @@ config.json
 .idea/
 *.swp
 *.log
+
+# Python smoke-test artifacts
+__pycache__/
+*.pyc

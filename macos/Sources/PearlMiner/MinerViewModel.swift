@@ -1,3 +1,5 @@
+import AppKit
+import UniformTypeIdentifiers
 import Foundation
 import SwiftUI
 
@@ -37,6 +39,13 @@ final class MinerViewModel: ObservableObject {
     @Published var showWalletSheet: Bool = false
     @Published var showSettingsSheet: Bool = false
     @Published var hasLoadedInitialState: Bool = false
+    @Published var engineAvailable = false
+    @Published var confirmWalletReplacement = false
+    @Published var walletNotice: String?
+    private var pendingWalletCommand: [String: Any]?
+    private var shuttingDown = false
+    private var engineGeneration = UUID()
+    private var engineFailureDetail: String?
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -49,11 +58,21 @@ final class MinerViewModel: ObservableObject {
     }
 
     func shutdown() {
-        sendCommand(["cmd": "quit"])
-        if let p = process, p.isRunning {
-            p.terminate()
+        shuttingDown = true
+        let pipe = stdinPipe
+        writeQueue.sync {
+            try? pipe?.fileHandleForWriting.write(contentsOf: Data("{\"cmd\":\"quit\"}\n".utf8))
+            try? pipe?.fileHandleForWriting.close()
         }
-        process = nil
+        // EOF is also a shutdown request. Let the engine release its pool and sleep assertion.
+        stdinPipe = nil
+    }
+
+    func restartEngine() {
+        guard process?.isRunning != true else { return }
+        errorMessage = nil
+        shuttingDown = false
+        launchDaemon()
     }
 
     private func resolveCoreBinary() -> URL? {
@@ -82,6 +101,10 @@ final class MinerViewModel: ObservableObject {
     }
 
     func launchDaemon() {
+        engineGeneration = UUID()
+        let generation = engineGeneration
+        engineFailureDetail = nil
+        engineAvailable = false
         guard let bin = resolveCoreBinary() else {
             errorMessage = "Could not find pearl-miner-core engine binary."
             return
@@ -89,6 +112,24 @@ final class MinerViewModel: ObservableObject {
         let proc = Process()
         proc.executableURL = bin
         proc.arguments = ["daemon"]
+        proc.terminationHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.engineGeneration == generation else { return }
+                self.engineAvailable = false
+                self.isMining = false
+                self.equivThs = 0
+                self.economics = nil
+                self.revealedPrivateKey = nil
+                self.market = MarketAndPoolSnapshot()
+                self.power = PowerReading(systemWatts: nil, gpuWatts: nil, isEstimated: true, onBattery: false)
+                self.isRunningSelfTest = false
+                self.isRunningBenchmark = false
+                if !self.shuttingDown {
+                    self.statusState = "error"
+                    self.errorMessage = self.l10n.engineStopped + (self.engineFailureDetail.map { "\n" + $0 } ?? "")
+                }
+            }
+        }
 
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -111,7 +152,7 @@ final class MinerViewModel: ObservableObject {
                     let lineData = buffer.subdata(in: 0..<nlIndex)
                     buffer.removeSubrange(0...nlIndex)
                     if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
-                        await self?.handleDaemonLine(line)
+                        await self?.handleDaemonLine(line, generation: generation)
                     }
                 }
             }
@@ -124,7 +165,7 @@ final class MinerViewModel: ObservableObject {
                 if chunk.isEmpty { break }
                 if let text = String(data: chunk, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !text.isEmpty {
-                    await self?.appendLog(level: "stderr", message: text)
+                    await self?.handleDaemonError(text, generation: generation)
                 }
             }
         }
@@ -137,11 +178,22 @@ final class MinerViewModel: ObservableObject {
     }
 
     private func sendCommand(_ dict: [String: Any]) {
-        guard let pipe = stdinPipe else { return }
+        guard let pipe = stdinPipe, process?.isRunning == true else {
+            errorMessage = l10n.engineStopped
+            isMining = false
+            return
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return }
         let payload = data + Data([0x0A])
-        writeQueue.async {
-            try? pipe.fileHandleForWriting.write(contentsOf: payload)
+        writeQueue.async { [weak self] in
+            do { try pipe.fileHandleForWriting.write(contentsOf: payload) }
+            catch {
+                Task { @MainActor [weak self] in
+                    self?.engineAvailable = false
+                    self?.isMining = false
+                    self?.errorMessage = self?.l10n.engineStopped
+                }
+            }
         }
     }
 
@@ -152,17 +204,32 @@ final class MinerViewModel: ObservableObject {
         saveConfig(updated)
     }
 
-    func saveConfig(_ newConfig: MinerConfig) {
+    @discardableResult
+    func saveConfig(_ newConfig: MinerConfig) -> Bool {
+        let workerOK = !newConfig.worker.isEmpty && newConfig.worker.utf8.count <= 64 && newConfig.worker.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0)) }
+        let hostOK = !newConfig.customHost.isEmpty && !newConfig.customHost.contains(where: { $0.isWhitespace || "/\\".contains($0) })
+        guard workerOK, newConfig.electricityUsdPerKwh.isFinite, newConfig.electricityUsdPerKwh >= 0,
+              newConfig.pool != .custom || (hostOK && (1...65535).contains(newConfig.customPort)) else {
+            errorMessage = l10n.invalidSettings
+            return false
+        }
+        errorMessage = nil
         self.config = newConfig
         if let lang = AppLanguage(rawValue: newConfig.language) {
             self.language = lang
         }
         guard let data = try? JSONEncoder().encode(newConfig),
-              let cfgObj = try? JSONSerialization.jsonObject(with: data) else { return }
+              let cfgObj = try? JSONSerialization.jsonObject(with: data) else { return false }
         sendCommand(["cmd": "update_config", "config": cfgObj])
+        return true
     }
 
     func startMining() {
+        guard engineAvailable, wallet != nil, !isRunningBenchmark, !isRunningSelfTest else {
+            errorMessage = l10n.engineStopped
+            return
+        }
+        isMining = true
         errorMessage = nil
         acceptedShares = 0
         rejectedShares = 0
@@ -180,22 +247,55 @@ final class MinerViewModel: ObservableObject {
 
     func createWallet() {
         errorMessage = nil
-        sendCommand(["cmd": "wallet_create"])
+        requestWalletChange(["cmd": "wallet_create"])
     }
 
     func importPrivateKey(_ hex: String) {
         errorMessage = nil
-        sendCommand(["cmd": "wallet_import_key", "private_key_hex": hex])
+        requestWalletChange(["cmd": "wallet_import_key", "private_key_hex": hex])
     }
 
     func importWalletFile(_ url: URL) {
         errorMessage = nil
-        sendCommand(["cmd": "wallet_import_file", "path": url.path])
+        requestWalletChange(["cmd": "wallet_import_file", "path": url.path])
     }
 
     func connectAddress(_ address: String) {
         errorMessage = nil
-        sendCommand(["cmd": "wallet_connect_address", "address": address])
+        requestWalletChange(["cmd": "wallet_connect_address", "address": address])
+    }
+
+    private func requestWalletChange(_ command: [String: Any]) {
+        guard !isMining else { errorMessage = l10n.stopToEditPool; return }
+        walletNotice = nil
+        if wallet != nil {
+            pendingWalletCommand = command
+            confirmWalletReplacement = true
+        } else { sendCommand(command) }
+    }
+
+    func replaceWalletConfirmed() {
+        guard let command = pendingWalletCommand else { return }
+        pendingWalletCommand = nil
+        sendCommand(command)
+    }
+
+    func cancelWalletReplacement() { pendingWalletCommand = nil }
+
+    func exportWallet() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "PearlMiner-wallet-backup.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        sendCommand(["cmd": "wallet_export", "path": url.path])
+    }
+
+    func acknowledgeWalletBackup() { sendCommand(["cmd": "wallet_acknowledge_backup"]) }
+
+    func showWalletBackups() {
+        guard let wallet else { return }
+        let folder = URL(fileURLWithPath: wallet.path).deletingLastPathComponent()
+        NSWorkspace.shared.open(folder)
     }
 
     func revealPrivateKey() {
@@ -218,17 +318,25 @@ final class MinerViewModel: ObservableObject {
         sendCommand(["cmd": "benchmark", "seconds": 10.0])
     }
 
+    private func handleDaemonError(_ message: String, generation: UUID) {
+        guard engineGeneration == generation else { return }
+        engineFailureDetail = message
+        appendLog(level: "stderr", message: message)
+    }
+
     private func appendLog(level: String, message: String) {
         let df = DateFormatter()
         df.dateFormat = "HH:mm:ss"
         let entry = LogEntry(timestamp: df.string(from: Date()), level: level, message: message)
+        if level == "stderr", !shuttingDown { errorMessage = message }
         logs.append(entry)
         if logs.count > 200 {
             logs.removeFirst(logs.count - 200)
         }
     }
 
-    private func handleDaemonLine(_ line: String) {
+    private func handleDaemonLine(_ line: String, generation: UUID) {
+        guard engineGeneration == generation else { return }
         guard let data = line.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else { return }
@@ -236,7 +344,16 @@ final class MinerViewModel: ObservableObject {
         let decoder = JSONDecoder()
 
         switch type {
+        case "config_updated":
+            if let cfgObj = json["config"], let data = try? JSONSerialization.data(withJSONObject: cfgObj),
+               let cfg = try? decoder.decode(MinerConfig.self, from: data) {
+                config = cfg
+                language = AppLanguage(rawValue: cfg.language) ?? .en
+            }
+
         case "state_snapshot":
+            self.engineAvailable = true
+            self.wallet = nil
             if let cfgObj = json["config"],
                let cfgData = try? JSONSerialization.data(withJSONObject: cfgObj),
                let cfg = try? decoder.decode(MinerConfig.self, from: cfgData) {
@@ -267,6 +384,7 @@ final class MinerViewModel: ObservableObject {
             }
             if let mFlag = json["mining"] as? Bool {
                 self.isMining = mFlag
+                if !mFlag { self.statusState = "stopped"; self.statusDetail = "" }
             }
             self.hasLoadedInitialState = true
 
@@ -279,9 +397,20 @@ final class MinerViewModel: ObservableObject {
             self.certVersion = json["cert_version"] as? UInt32
             self.uptimeSeconds = json["uptime_s"] as? UInt64 ?? 0
             self.isMining = (state == "mining" || state == "connecting" || state == "reconnecting" || state == "paused_battery")
+            if !self.isMining { self.pendingShares = 0 }
+            if state != "mining" {
+                self.equivThs = 0
+                self.tilesPerS = 0
+                self.economics = nil
+            }
             if state == "error" && !statusDetail.isEmpty {
                 self.errorMessage = statusDetail
             }
+
+        case "shares":
+            self.acceptedShares = json["accepted"] as? UInt64 ?? acceptedShares
+            self.rejectedShares = json["rejected"] as? UInt64 ?? rejectedShares
+            self.pendingShares = json["pending"] as? Int ?? pendingShares
 
         case "metrics":
             self.tilesPerS = json["tiles_per_s"] as? Double ?? 0
@@ -305,7 +434,7 @@ final class MinerViewModel: ObservableObject {
             if let mObj = json["market"],
                let mData = try? JSONSerialization.data(withJSONObject: mObj),
                let m = try? decoder.decode(MarketAndPoolSnapshot.self, from: mData) {
-                self.market = m
+                if m.walletAddress == nil || m.walletAddress == wallet?.address { self.market = m }
             }
 
         case "power":
@@ -315,7 +444,12 @@ final class MinerViewModel: ObservableObject {
                 self.power = p
             }
 
+        case "wallet_exported":
+            walletNotice = l10n.backupSaved
+
         case "wallet_updated":
+            self.market = MarketAndPoolSnapshot()
+            self.wallet = nil
             if let wObj = json["wallet"], !(wObj is NSNull),
                let wData = try? JSONSerialization.data(withJSONObject: wObj),
                let w = try? decoder.decode(WalletSummary.self, from: wData) {
@@ -345,9 +479,12 @@ final class MinerViewModel: ObservableObject {
             let msg = json["message"] as? String ?? ""
             appendLog(level: lvl, message: msg)
 
+        case "diagnostic_error":
+            if json["operation"] as? String == "self_test" { self.isRunningSelfTest = false }
+            if json["operation"] as? String == "benchmark" { self.isRunningBenchmark = false }
+            self.errorMessage = json["message"] as? String
+
         case "error":
-            self.isRunningSelfTest = false
-            self.isRunningBenchmark = false
             let msg = json["message"] as? String ?? "Unknown error"
             self.errorMessage = msg
             appendLog(level: "error", message: msg)
