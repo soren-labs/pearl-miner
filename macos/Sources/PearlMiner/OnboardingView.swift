@@ -93,6 +93,7 @@ struct OnboardingView: View {
                 .font(.caption)
                 .foregroundStyle(.primary)
             Spacer()
+            if !vm.engineAvailable { Button(vm.l10n.retry) { vm.restartEngine() } }
             Button {
                 vm.errorMessage = nil
             } label: {
@@ -132,7 +133,7 @@ struct OnboardingView: View {
                     Text(l.importWalletFile).tag(WalletSetupMode.importFile)
                     Text(l.connectAddressOnly).tag(WalletSetupMode.addressOnly)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
 
                 switch walletTab {
@@ -165,7 +166,7 @@ struct OnboardingView: View {
 
                 case .importFile:
                     HStack(spacing: 12) {
-                        Text("Import an existing Pearl wallet.json file.")
+                        Text(l.importWalletDesc)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -241,7 +242,17 @@ struct OnboardingView: View {
                 }
                 .padding(10)
                 .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+
             }
+            if wallet.hasPrivateKey {
+                Button(l.exportBackup) { vm.exportWallet() }
+                if let notice = vm.walletNotice { Text(notice).font(.caption).foregroundStyle(.green) }
+                if wallet.needsBackup {
+                    Text(l.backupWarning).font(.caption).foregroundStyle(.orange)
+                    Toggle(l.backupAcknowledged, isOn: Binding(get: { !wallet.needsBackup }, set: { if $0 { vm.acknowledgeWalletBackup() } })).font(.caption)
+                }
+            }
+
         }
     }
 
@@ -318,17 +329,18 @@ struct OnboardingView: View {
 
                 if vm.wallet != nil {
                     Button {
-                        applyPoolConfig()
+                        guard applyPoolConfig() else { return }
                         vm.revealedPrivateKey = nil
                         onContinueToDashboard()
                     } label: {
                         Text(vm.language == .en ? "Dashboard" : "进入面板")
                     }
                     .buttonStyle(.bordered)
+                    .disabled(vm.wallet?.needsBackup == true)
                 }
 
                 Button {
-                    applyPoolConfig()
+                    guard applyPoolConfig() else { return }
                     vm.revealedPrivateKey = nil
                     vm.startMining()
                     onContinueToDashboard()
@@ -338,7 +350,7 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(vm.wallet == nil)
+                .disabled(vm.wallet == nil || !vm.engineAvailable || (vm.wallet?.needsBackup == true))
             }
         }
         .padding(16)
@@ -350,7 +362,7 @@ struct OnboardingView: View {
         .opacity(vm.wallet == nil ? 0.65 : 1.0)
     }
 
-    private func applyPoolConfig() {
+    private func applyPoolConfig() -> Bool {
         var next = vm.config
         next.pool = selectedPool
         let trimmedWorker = workerInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -360,9 +372,10 @@ struct OnboardingView: View {
         if selectedPool == .custom {
             let trimmedHost = customHost.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedHost.isEmpty { next.customHost = trimmedHost }
-            if let port = Int(customPort), port > 0, port <= 65535 { next.customPort = port }
+            guard let port = Int(customPort), port > 0, port <= 65535 else { vm.errorMessage = vm.l10n.invalidSettings; return false }
+            next.customPort = port
             next.customDialect = customDialect
         }
-        vm.saveConfig(next)
+        return vm.saveConfig(next)
     }
 }

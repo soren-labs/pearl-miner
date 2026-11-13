@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,7 +50,7 @@ pub enum DialectKind {
     Kryptex,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MinerConfig {
     pub language: String,
@@ -66,8 +66,6 @@ pub struct MinerConfig {
     pub cpu_threads: usize,
     pub electricity_usd_per_kwh: f64,
     pub live_market_sync: bool,
-    pub fallback_prl_price_usd: f64,
-    pub fallback_network_hashrate_ehs: f64,
 }
 
 impl Default for MinerConfig {
@@ -87,13 +85,57 @@ impl Default for MinerConfig {
             cpu_threads: 4,
             electricity_usd_per_kwh: 0.15,
             live_market_sync: true,
-            fallback_prl_price_usd: 1.40,
-            fallback_network_hashrate_ehs: 35.0,
         }
     }
 }
 
 impl MinerConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(self.language.as_str(), "en" | "zh-Hans"),
+            "Unsupported language"
+        );
+        ensure!(
+            (25..=100).contains(&self.intensity),
+            "GPU intensity must be 25–100%"
+        );
+        ensure!(
+            (1..=32).contains(&self.cpu_threads),
+            "CPU threads must be 1–32"
+        );
+        ensure!(
+            !self.worker.is_empty()
+                && self.worker.len() <= 64
+                && self
+                    .worker
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+            "Worker must contain 1–64 letters, numbers, dots, hyphens or underscores"
+        );
+        ensure!(
+            self.electricity_usd_per_kwh.is_finite() && self.electricity_usd_per_kwh >= 0.0,
+            "Electricity rate must be a finite, nonnegative number"
+        );
+        if self.pool == PoolKind::Custom {
+            ensure!(
+                !self.custom_host.is_empty()
+                    && self.custom_host.trim() == self.custom_host
+                    && !self
+                        .custom_host
+                        .chars()
+                        .any(|c| c.is_whitespace() || "/\\".contains(c)),
+                "Enter a hostname or IP address without a URL scheme"
+            );
+            ensure!(self.custom_port > 0, "Pool port must be 1–65535");
+        }
+        Ok(())
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.pool == other.pool
+            && self.effective_endpoint() == other.effective_endpoint()
+            && self.worker == other.worker
+    }
     pub fn effective_endpoint(&self) -> (DialectKind, String, u16) {
         match self.pool {
             PoolKind::Luckypool => (
@@ -130,7 +172,18 @@ pub fn hostname_short() -> String {
             .unwrap_or("mac");
         let short = s.split('.').next().unwrap_or("mac").trim();
         if !short.is_empty() {
-            return short.to_string();
+            let safe: String = short
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .take(64)
+                .collect();
+            return safe;
         }
     }
     "mac".to_string()
@@ -155,20 +208,21 @@ pub fn default_wallet_path() -> PathBuf {
     app_support_dir().join("wallet.json")
 }
 
-pub fn load_config(path: &Path) -> MinerConfig {
+pub fn load_config(path: &Path) -> Result<MinerConfig> {
     match fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => MinerConfig::default(),
+        Ok(raw) => {
+            let cfg: MinerConfig = serde_json::from_str(&raw)
+                .with_context(|| format!("Invalid configuration: {}", path.display()))?;
+            cfg.validate()?;
+            Ok(cfg)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MinerConfig::default()),
+        Err(e) => Err(e.into()),
     }
 }
 
 pub fn save_config(path: &Path, cfg: &MinerConfig) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    cfg.validate()?;
     let json = serde_json::to_string_pretty(cfg)? + "\n";
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    crate::storage::atomic_write(path, json.as_bytes())
 }

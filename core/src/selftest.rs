@@ -114,7 +114,8 @@ pub fn run_self_test() -> Result<SelfTestReport> {
     let k = 2048usize;
     let r = 128usize;
     let shape = JobShape::new(m, n, k, r)?;
-    let pm_shape = PmShape::from_patterns(k as u32, r as u32, &shape.rows_pattern, &shape.cols_pattern);
+    let pm_shape =
+        PmShape::from_patterns(k as u32, r as u32, &shape.rows_pattern, &shape.cols_pattern);
     metal.compile(&pm_shape)?;
     let kernel_name = metal.sweep_kernel_name();
 
@@ -153,7 +154,10 @@ pub fn run_self_test() -> Result<SelfTestReport> {
 
         let ref_ua = rust_noise_uniform(&SEED_LABEL_A, &grid.a_seed, m, r);
         let gpu_ua: Vec<i8> = ua.as_slice()[..m * r].iter().map(|&b| b as i8).collect();
-        ensure!(gpu_ua == ref_ua, "noise_uniform mismatch for cert v{cert_version}");
+        ensure!(
+            gpu_ua == ref_ua,
+            "noise_uniform mismatch for cert v{cert_version}"
+        );
         checks += 1;
 
         let ref_pa = rust_noise_pairs(&SEED_LABEL_A, &grid.a_seed, k, r);
@@ -238,8 +242,10 @@ pub fn run_self_test() -> Result<SelfTestReport> {
         let easy_target = U256::MAX / U256::from(16u64);
         verify_share_local(&header_bytes, &proof, easy_target, cert_version)?;
         let b64 = plain_proof_to_base64(&proof)?;
-        let roundtrip: PlainProof =
-            PlainProof::deserialize_compat(&base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)?)?;
+        let roundtrip: PlainProof = PlainProof::deserialize_compat(&base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &b64,
+        )?)?;
         verify_share_local(&header_bytes, &roundtrip, easy_target, cert_version)?;
         checks += 2;
     }

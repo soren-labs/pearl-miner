@@ -3,11 +3,9 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::{bail, Result};
-use pearl_miner_core::config::{
-    default_config_path, default_wallet_path, load_config, PoolKind,
-};
+use pearl_miner_core::config::{default_config_path, default_wallet_path, load_config, PoolKind};
 use pearl_miner_core::engine::{
-    detect_hardware, run_benchmark, run_daemon, run_mining_session,
+    detect_hardware, run_benchmark, run_daemon, run_mining_session, start_market_poller,
 };
 use pearl_miner_core::pool_stats::MarketAndPoolSnapshot;
 use pearl_miner_core::power::PowerTelemetry;
@@ -98,14 +96,24 @@ fn main() -> Result<()> {
                     println!("Mode: {:?}", w.mode);
                     println!("Path: {}", path.display());
                 }
+                "acknowledge-backup" => {
+                    let mut w = load_and_verify_wallet(&path)?;
+                    w.backup_confirmed = true;
+                    write_wallet_file(&path, &w)?;
+                    println!("Backup acknowledged for {}", w.address);
+                }
                 "import-key" => {
-                    let key = args.get(2).ok_or_else(|| anyhow::anyhow!("missing hex key"))?;
+                    let key = args
+                        .get(2)
+                        .ok_or_else(|| anyhow::anyhow!("missing hex key"))?;
                     let w = wallet_from_private_key_hex(key)?;
                     write_wallet_file(&path, &w)?;
                     println!("Imported wallet: {}", w.address);
                 }
                 "connect" => {
-                    let addr = args.get(2).ok_or_else(|| anyhow::anyhow!("missing address"))?;
+                    let addr = args
+                        .get(2)
+                        .ok_or_else(|| anyhow::anyhow!("missing address"))?;
                     let w = wallet_from_watch_address(addr)?;
                     write_wallet_file(&path, &w)?;
                     println!("Connected payout address: {}", w.address);
@@ -115,7 +123,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         "mine" => {
-            let mut cfg = load_config(&default_config_path());
+            let mut cfg = load_config(&default_config_path())?;
             let mut address: Option<String> = None;
             let mut time_limit: Option<f64> = None;
             let mut max_accepted: Option<u64> = None;
@@ -144,11 +152,24 @@ fn main() -> Result<()> {
                     }
                     "--time-limit" => {
                         i += 1;
-                        time_limit = args.get(i).and_then(|s| s.parse().ok());
+                        let seconds: f64 = args
+                            .get(i)
+                            .ok_or_else(|| anyhow::anyhow!("missing time limit"))?
+                            .parse()?;
+                        anyhow::ensure!(
+                            seconds.is_finite() && seconds > 0.0,
+                            "Time limit must be finite and positive"
+                        );
+                        time_limit = Some(seconds);
                     }
                     "--max-accepted" => {
                         i += 1;
-                        max_accepted = args.get(i).and_then(|s| s.parse().ok());
+                        let count: u64 = args
+                            .get(i)
+                            .ok_or_else(|| anyhow::anyhow!("missing share limit"))?
+                            .parse()?;
+                        anyhow::ensure!(count > 0, "Share limit must be positive");
+                        max_accepted = Some(count);
                     }
                     other => bail!("unknown flag: {other}"),
                 }
@@ -156,15 +177,20 @@ fn main() -> Result<()> {
             }
             let addr = match address {
                 Some(a) => validate_payout_address(&a)?,
-                None => load_and_verify_wallet(&default_wallet_path())?.address,
+                None => {
+                    let w = load_and_verify_wallet(&default_wallet_path())?;
+                    anyhow::ensure!(
+                        w.backup_confirmed,
+                        "Back up the wallet, then run wallet acknowledge-backup before mining"
+                    );
+                    w.address
+                }
             };
             let stop = Arc::new(AtomicBool::new(false));
             let stop_sig = Arc::clone(&stop);
             unsafe {
-                libc::signal(
-                    libc::SIGINT,
-                    sigint_handler as *const () as usize,
-                );
+                libc::signal(libc::SIGINT, sigint_handler as *const () as usize);
+                libc::signal(libc::SIGTERM, sigint_handler as *const () as usize);
             }
             std::thread::spawn(move || {
                 while !SIGNALLED.load(Ordering::SeqCst) {
@@ -173,6 +199,13 @@ fn main() -> Result<()> {
                 stop_sig.store(true, Ordering::SeqCst);
             });
             let market = Arc::new(Mutex::new(MarketAndPoolSnapshot::default()));
+            let cfg = Arc::new(Mutex::new(cfg));
+            let _poller = start_market_poller(
+                Arc::clone(&cfg),
+                Arc::clone(&market),
+                None,
+                Some(addr.clone()),
+            );
             run_mining_session(cfg, addr, stop, market, None, max_accepted, time_limit)
         }
         other => {

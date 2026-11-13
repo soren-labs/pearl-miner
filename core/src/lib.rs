@@ -6,5 +6,6 @@ pub mod metal;
 pub mod pool_stats;
 pub mod power;
 pub mod selftest;
+pub mod storage;
 pub mod stratum;
 pub mod wallet;

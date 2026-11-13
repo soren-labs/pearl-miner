@@ -2,14 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.1.1}"
+SIGN_IDENTITY="${PEARL_CODESIGN_IDENTITY:--}"
+NOTARY_PROFILE="${PEARL_NOTARY_PROFILE:-}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Version must have the form 1.2.3" >&2
+  exit 1
+fi
+if [[ -n "$NOTARY_PROFILE" && "$SIGN_IDENTITY" == "-" ]]; then
+  echo "Notarization requires a Developer ID Application signing identity." >&2
+  exit 1
+fi
 DIST_DIR="$ROOT_DIR/dist"
 APP_NAME="PearlMiner.app"
 APP_DIR="$DIST_DIR/$APP_NAME"
 BUNDLE_ID="io.pearlminer.mac"
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "Build the arm64 release on an Apple Silicon Mac." >&2
+  exit 1
+fi
 
 echo "==> Building Rust core (pearl-miner-core)..."
-cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" -p pearl-miner-core
+cargo build --release --locked --manifest-path "$ROOT_DIR/Cargo.toml" -p pearl-miner-core
 
 SWIFT_FLAGS=(-c release)
 if [[ ! -d "/Applications/Xcode.app" && -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]]; then
@@ -86,8 +100,17 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-echo "==> Ad-hoc code signing $APP_DIR..."
-codesign --force --deep --sign - "$APP_DIR"
+echo "==> Signing $APP_DIR..."
+SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY")
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  SIGN_FLAGS+=(--options runtime --timestamp)
+else
+  echo "Development build: ad-hoc signed, not notarized."
+fi
+# Sign nested executables first, then the bundle; --deep is for verification.
+codesign "${SIGN_FLAGS[@]}" "$APP_DIR/Contents/MacOS/pearl-miner-core"
+codesign "${SIGN_FLAGS[@]}" "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 ZIP_PATH="$DIST_DIR/PearlMiner-macOS-arm64.zip"
 DMG_PATH="$DIST_DIR/PearlMiner-macOS-arm64.dmg"
@@ -95,6 +118,13 @@ rm -f "$ZIP_PATH" "$DMG_PATH"
 
 echo "==> Packaging $ZIP_PATH..."
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP_DIR"
+  xcrun stapler validate "$APP_DIR"
+  rm -f "$ZIP_PATH"
+  ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+fi
 
 echo "==> Packaging $DMG_PATH..."
 DMG_STAGE="$WORK_TMP/dmg"
@@ -102,6 +132,15 @@ mkdir -p "$DMG_STAGE"
 cp -R "$APP_DIR" "$DMG_STAGE/"
 ln -s /Applications "$DMG_STAGE/Applications"
 hdiutil create -volname "PearlMiner" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+fi
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG_PATH"
+  xcrun stapler validate "$DMG_PATH"
+  spctl --assess --type execute --verbose "$APP_DIR"
+fi
 
 (
   cd "$DIST_DIR"

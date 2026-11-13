@@ -36,7 +36,7 @@ struct PearlMinerApp: App {
                             .controlSize(.small)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if showOnboarding || vm.wallet == nil {
+                } else if showOnboarding || vm.wallet == nil || vm.wallet?.needsBackup == true {
                     OnboardingView(vm: vm) {
                         showOnboarding = false
                     }

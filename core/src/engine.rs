@@ -23,7 +23,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,12 @@ pub struct RateMeter {
     samples: VecDeque<(Instant, u64)>,
     total: u64,
     started: Instant,
+}
+
+impl Default for RateMeter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RateMeter {
@@ -241,8 +247,7 @@ impl MetalEngine {
         bound_le: &[u8; 32],
     ) -> Result<(Vec<(u32, u32)>, u64)> {
         self.hits_buf.as_u32_mut_slice()[0] = 0;
-        let n_tiles: u64;
-        if self.fast_path {
+        let n_tiles = if self.fast_path {
             let bands_per = (self.region_rows / 32).max(1);
             let band_lo = idx * bands_per;
             let n_bands = bands_per.min(self.n_bands.saturating_sub(band_lo));
@@ -257,7 +262,7 @@ impl MetalEngine {
                 &mut self.hits_buf,
                 None,
             )?;
-            n_tiles = (n_bands * 32 * self.n_cb) as u64;
+            (n_bands * 32 * self.n_cb) as u64
         } else {
             let lo = idx * self.region_rows;
             let hi = (lo + self.region_rows).min(self.shape.row_bases.len());
@@ -275,8 +280,8 @@ impl MetalEngine {
                 &mut self.hits_buf,
                 None,
             )?;
-            n_tiles = (slice.len() * self.shape.col_bases.len()) as u64;
-        }
+            (slice.len() * self.shape.col_bases.len()) as u64
+        };
         let u32s = self.hits_buf.as_u32_slice();
         let count = (u32s[0] as usize).min(HITS_CAPACITY);
         let mut hits = Vec::with_capacity(count);
@@ -322,6 +327,10 @@ pub struct BenchmarkReport {
 }
 
 pub fn run_benchmark(seconds: f64) -> Result<BenchmarkReport> {
+    anyhow::ensure!(
+        seconds.is_finite() && (0.1..=120.0).contains(&seconds),
+        "Benchmark duration must be 0.1–120 seconds"
+    );
     let mut engine = MetalEngine::new(None)?;
     let factory = GridFactory::new();
     let header_bytes = vec![0x42u8; 76];
@@ -386,7 +395,11 @@ fn spawn_caffeinate() -> Option<Child> {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // Events are serialized immediately, not stored in collections.
 pub enum DaemonEvent {
+    ConfigUpdated {
+        config: MinerConfig,
+    },
     StateSnapshot {
         config: MinerConfig,
         wallet: Option<WalletSummary>,
@@ -402,6 +415,11 @@ pub enum DaemonEvent {
         height: Option<u64>,
         cert_version: Option<u32>,
         uptime_s: u64,
+    },
+    Shares {
+        accepted: u64,
+        rejected: u64,
+        pending: usize,
     },
     Metrics {
         tiles_per_s: f64,
@@ -426,6 +444,9 @@ pub enum DaemonEvent {
         wallet: Option<WalletSummary>,
         revealed_private_key: Option<String>,
     },
+    WalletExported {
+        path: String,
+    },
     SelfTestResult {
         report: SelfTestReport,
     },
@@ -437,6 +458,10 @@ pub enum DaemonEvent {
         message: String,
     },
     Error {
+        message: String,
+    },
+    DiagnosticError {
+        operation: String,
         message: String,
     },
 }
@@ -453,6 +478,8 @@ pub enum DaemonCommand {
     WalletImportFile { path: String },
     WalletConnectAddress { address: String },
     WalletRevealKey,
+    WalletAcknowledgeBackup,
+    WalletExport { path: String },
     SelfTest,
     Benchmark { seconds: Option<f64> },
     RefreshMarket,
@@ -473,6 +500,7 @@ fn current_wallet_summary() -> Option<WalletSummary> {
         return None;
     }
     load_and_verify_wallet(&p).ok().map(|w| WalletSummary {
+        needs_backup: w.private_key_hex.is_some() && !w.backup_confirmed,
         address: w.address,
         mode: w.mode,
         has_private_key: w.private_key_hex.is_some(),
@@ -482,7 +510,7 @@ fn current_wallet_summary() -> Option<WalletSummary> {
 }
 
 pub fn run_mining_session(
-    cfg: MinerConfig,
+    shared_cfg: Arc<Mutex<MinerConfig>>,
     address: String,
     stop_flag: Arc<AtomicBool>,
     market_cache: Arc<Mutex<MarketAndPoolSnapshot>>,
@@ -490,6 +518,8 @@ pub fn run_mining_session(
     max_accepted: Option<u64>,
     time_limit_s: Option<f64>,
 ) -> Result<()> {
+    let cfg = shared_cfg.lock().unwrap().clone();
+    cfg.validate()?;
     let emit_or_print = |ev: DaemonEvent| {
         if let Some(ref o) = out {
             emit(o, &ev);
@@ -509,12 +539,22 @@ pub fn run_mining_session(
                     economics,
                     ..
                 } => {
+                    let estimate = if economics.earnings_available {
+                        if economics.usd_available {
+                            format!(
+                                "{:.3} PRL/d (${:.2}/d)",
+                                economics.prl_per_day, economics.gross_usd_per_day
+                            )
+                        } else {
+                            format!("{:.3} PRL/d (USD unavailable)", economics.prl_per_day)
+                        }
+                    } else {
+                        "unavailable".into()
+                    };
                     println!(
-                        "[stats] {equiv_ths:.2} TH/s | acc={accepted} rej={rejected} | sys={:.1}W gpu={:.1}W | est={:.3} PRL/d (${:.2}/d)",
+                        "[stats] {equiv_ths:.2} TH/s | acc={accepted} rej={rejected} | sys={:.1}W gpu={:.1}W | est={estimate}",
                         power.system_watts.unwrap_or(0.0),
                         power.gpu_watts.unwrap_or(0.0),
-                        economics.prl_per_day,
-                        economics.gross_usd_per_day
                     );
                 }
                 DaemonEvent::Error { message } => {
@@ -529,11 +569,8 @@ pub fn run_mining_session(
         .num_threads(cfg.cpu_threads.clamp(1, 32))
         .build_global();
 
-    let mut caffeinate_child = if cfg.keep_awake {
-        spawn_caffeinate()
-    } else {
-        None
-    };
+    let mut awake = AwakeGuard(None);
+    awake.update(cfg.keep_awake);
 
     let mut engine = MetalEngine::new(None)?;
     let factor = engine.shape.penalized_factor();
@@ -556,8 +593,14 @@ pub fn run_mining_session(
         uptime_s: 0,
     });
 
-    let mut conn = PoolConnection::new(dialect, host.clone(), port, address.clone(), cfg.worker.clone());
-    if let Err(e) = conn.connect() {
+    let mut conn = PoolConnection::new(
+        dialect,
+        host.clone(),
+        port,
+        address.clone(),
+        cfg.worker.clone(),
+    );
+    if let Err(e) = conn.connect(&stop_flag) {
         emit_or_print(DaemonEvent::Status {
             state: "error".into(),
             detail: e.to_string(),
@@ -566,9 +609,6 @@ pub fn run_mining_session(
             cert_version: None,
             uptime_s: 0,
         });
-        if let Some(ref mut c) = caffeinate_child {
-            let _ = c.kill();
-        }
         return Err(e);
     }
 
@@ -580,7 +620,7 @@ pub fn run_mining_session(
     let mut bound_le = [0u8; 32];
     let mut exp_tiles: Option<f64> = None;
     let mut row_cursor: usize = 0;
-    let mut pending: HashMap<u64, String> = HashMap::new();
+    let mut pending: HashMap<u64, (String, Instant)> = HashMap::new();
     let mut accepted: u64 = 0;
     let mut rejected: u64 = 0;
     let mut last_share_t: Option<Instant> = None;
@@ -593,6 +633,8 @@ pub fn run_mining_session(
     let mut last_power: PowerReading;
 
     while !stop_flag.load(Ordering::SeqCst) {
+        let cfg = shared_cfg.lock().unwrap().clone();
+        awake.update(cfg.keep_awake && !(on_batt && cfg.on_battery == BatteryPolicy::Pause));
         if let Some(limit) = time_limit_s {
             if meter.uptime_secs() as f64 >= limit {
                 break;
@@ -625,7 +667,7 @@ pub fn run_mining_session(
             if stop_flag.load(Ordering::SeqCst) {
                 break;
             }
-            match conn.connect() {
+            match conn.connect(&stop_flag) {
                 Ok(()) => {
                     pending.clear();
                     job = None;
@@ -677,7 +719,7 @@ pub fn run_mining_session(
                     }
                 }
                 PoolEvent::Share(sr) => {
-                    if let Some(jid) = pending.remove(&sr.msg_id) {
+                    if let Some((jid, _)) = pending.remove(&sr.msg_id) {
                         if sr.accepted {
                             accepted += 1;
                             last_share_t = Some(Instant::now());
@@ -692,7 +734,15 @@ pub fn run_mining_session(
                                 message: format!("Share REJECTED (job {jid}): {}", sr.raw),
                             });
                         }
+                        emit_or_print(DaemonEvent::Shares {
+                            accepted,
+                            rejected,
+                            pending: pending.len(),
+                        });
                     }
+                }
+                PoolEvent::AuthorizationFailed(reason) => {
+                    anyhow::bail!(reason);
                 }
                 PoolEvent::Disconnected(reason) => {
                     emit_or_print(DaemonEvent::Log {
@@ -702,6 +752,20 @@ pub fn run_mining_session(
                 }
             }
             ev_opt = conn.try_recv();
+        }
+
+        let before = pending.len();
+        pending.retain(|_, (_, sent)| sent.elapsed() < Duration::from_secs(60));
+        if pending.len() < before {
+            emit_or_print(DaemonEvent::Log {
+                level: "warn".into(),
+                message: "Unanswered share submissions expired; pool acceptance is unknown".into(),
+            });
+            emit_or_print(DaemonEvent::Shares {
+                accepted,
+                rejected,
+                pending: pending.len(),
+            });
         }
 
         let Some(ref cur_job) = job else {
@@ -765,7 +829,10 @@ pub fn run_mining_session(
         row_cursor += 1;
 
         for (base_r, base_c) in hits {
-            if conn.dead.load(Ordering::SeqCst) {
+            if stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            if conn.dead.load(Ordering::SeqCst) || pending.len() >= 64 {
                 break;
             }
             match cur_grid.craft_plain_proof(base_r, base_c) {
@@ -786,7 +853,12 @@ pub fn run_mining_session(
                         .and_then(|b64| conn.submit(&cur_job.job_id, &b64))
                     {
                         Ok(mid) => {
-                            pending.insert(mid, cur_job.job_id.clone());
+                            pending.insert(mid, (cur_job.job_id.clone(), Instant::now()));
+                            emit_or_print(DaemonEvent::Shares {
+                                accepted,
+                                rejected,
+                                pending: pending.len(),
+                            });
                             emit_or_print(DaemonEvent::Log {
                                 level: "info".into(),
                                 message: format!(
@@ -837,23 +909,14 @@ pub fn run_mining_session(
             let rolling = meter.rolling_tiles_per_s();
             let equiv_ths = rolling * (factor as f64) / 1e12;
             let market = market_cache.lock().unwrap().clone();
-            let price = market
-                .prl_price_usd
-                .unwrap_or(cfg.fallback_prl_price_usd);
-            let net_ehs = market
-                .network_hashrate_ehs
-                .unwrap_or(cfg.fallback_network_hashrate_ehs);
-            let is_live =
-                market.prl_price_usd.is_some() || market.network_hashrate_ehs.is_some();
             let sys_w = last_power.system_watts.unwrap_or(0.0);
             let econ = compute_economics(
                 rolling,
                 factor,
                 sys_w,
                 cfg.electricity_usd_per_kwh,
-                price,
-                net_ehs,
-                is_live,
+                &cfg,
+                &market,
             );
 
             emit_or_print(DaemonEvent::Status {
@@ -872,7 +935,13 @@ pub fn run_mining_session(
                 rejected,
                 pending: pending.len(),
                 last_share_ago_s: last_share_t.map(|t| t.elapsed().as_secs()),
-                est_next_share_s: exp_tiles.and_then(|e| if rolling > 0.0 { Some(e / rolling) } else { None }),
+                est_next_share_s: exp_tiles.and_then(|e| {
+                    if rolling > 0.0 {
+                        Some(e / rolling)
+                    } else {
+                        None
+                    }
+                }),
                 intensity_now: intensity,
                 power: last_power.clone(),
                 economics: econ,
@@ -881,9 +950,7 @@ pub fn run_mining_session(
     }
 
     conn.close();
-    if let Some(ref mut c) = caffeinate_child {
-        let _ = c.kill();
-    }
+
     emit_or_print(DaemonEvent::Status {
         state: "stopped".into(),
         detail: "Ready".into(),
@@ -903,10 +970,64 @@ fn u256_to_f64(v: U256) -> f64 {
     res
 }
 
+struct AwakeGuard(Option<Child>);
+impl AwakeGuard {
+    fn update(&mut self, enabled: bool) {
+        if enabled && self.0.is_none() {
+            self.0 = spawn_caffeinate();
+        }
+        if !enabled {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+impl Drop for AwakeGuard {
+    fn drop(&mut self) {
+        self.update(false);
+    }
+}
+
+pub fn start_market_poller(
+    cfg: Arc<Mutex<MinerConfig>>,
+    market: Arc<Mutex<MarketAndPoolSnapshot>>,
+    out: Option<Arc<Mutex<std::io::Stdout>>>,
+    fixed_address: Option<String>,
+) -> mpsc::SyncSender<()> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || loop {
+        let cur = cfg.lock().unwrap().clone();
+        let address = fixed_address
+            .clone()
+            .or_else(|| current_wallet_summary().map(|w| w.address));
+        if cur.live_market_sync {
+            let snap = fetch_snapshot(&cur, address.as_deref());
+            let latest = cfg.lock().unwrap().clone();
+            let latest_address = fixed_address
+                .clone()
+                .or_else(|| current_wallet_summary().map(|w| w.address));
+            if latest.live_market_sync && cur.same_connection(&latest) && latest_address == address
+            {
+                *market.lock().unwrap() = snap.clone();
+                if let Some(ref out) = out {
+                    emit(out, &DaemonEvent::Market { market: snap });
+                }
+            }
+        }
+        if let Err(mpsc::RecvTimeoutError::Disconnected) = rx.recv_timeout(Duration::from_secs(60))
+        {
+            break;
+        }
+    });
+    tx
+}
+
 pub fn run_daemon() -> Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let cfg_path = default_config_path();
-    let cfg = Arc::new(Mutex::new(load_config(&cfg_path)));
+    let cfg = Arc::new(Mutex::new(load_config(&cfg_path)?));
     let market = Arc::new(Mutex::new(MarketAndPoolSnapshot::default()));
 
     let hardware = detect_hardware().ok();
@@ -918,23 +1039,12 @@ pub fn run_daemon() -> Result<()> {
     let mut telemetry = PowerTelemetry::new();
     let init_power = telemetry.sample(&dev_name, 0);
 
-    // Background market + pool balance poller
-    {
-        let cfg_m = Arc::clone(&cfg);
-        let market_m = Arc::clone(&market);
-        let out_m = Arc::clone(&out);
-        thread::spawn(move || loop {
-            let cur_cfg = cfg_m.lock().unwrap().clone();
-            if cur_cfg.live_market_sync {
-                let (dialect, _, _) = cur_cfg.effective_endpoint();
-                let addr = current_wallet_summary().map(|w| w.address);
-                let snap = fetch_snapshot(dialect, addr.as_deref());
-                *market_m.lock().unwrap() = snap.clone();
-                emit(&out_m, &DaemonEvent::Market { market: snap });
-            }
-            thread::sleep(Duration::from_secs(60));
-        });
-    }
+    let refresh_market = start_market_poller(
+        Arc::clone(&cfg),
+        Arc::clone(&market),
+        Some(Arc::clone(&out)),
+        None,
+    );
 
     // Background idle power sampler (pauses when mining loop owns telemetry)
     let is_mining = Arc::new(AtomicBool::new(false));
@@ -963,6 +1073,20 @@ pub fn run_daemon() -> Result<()> {
         },
     );
 
+    if default_wallet_path().exists() {
+        if let Err(e) = load_and_verify_wallet(&default_wallet_path()) {
+            emit(
+                &out,
+                &DaemonEvent::Error {
+                    message: format!(
+                        "Wallet could not be loaded; the original file has been preserved: {e}"
+                    ),
+                },
+            );
+        }
+    }
+
+    let diagnostics_busy = Arc::new(AtomicBool::new(false));
     let mut mining_stop: Option<Arc<AtomicBool>> = None;
     let mut mining_handle: Option<thread::JoinHandle<()>> = None;
 
@@ -986,6 +1110,23 @@ pub fn run_daemon() -> Result<()> {
             }
         };
 
+        if is_mining.load(Ordering::SeqCst)
+            && matches!(
+                &cmd,
+                DaemonCommand::WalletCreate
+                    | DaemonCommand::WalletImportKey { .. }
+                    | DaemonCommand::WalletImportFile { .. }
+                    | DaemonCommand::WalletConnectAddress { .. }
+            )
+        {
+            emit(
+                &out,
+                &DaemonEvent::Error {
+                    message: "Stop mining before replacing the wallet".into(),
+                },
+            );
+            continue;
+        }
         match cmd {
             DaemonCommand::GetState => {
                 let p = PowerTelemetry::new().sample(&dev_name, 0);
@@ -1002,25 +1143,46 @@ pub fn run_daemon() -> Result<()> {
                 );
             }
             DaemonCommand::UpdateConfig { config: new_cfg } => {
-                if let Err(e) = save_config(&cfg_path, &new_cfg) {
-                    emit(
-                        &out,
-                        &DaemonEvent::Error {
-                            message: format!("Failed to save config: {e}"),
-                        },
+                let old = cfg.lock().unwrap().clone();
+                let valid = new_cfg.validate().and_then(|_| {
+                    anyhow::ensure!(
+                        !is_mining.load(Ordering::SeqCst)
+                            || (old.same_connection(&new_cfg)
+                                && old.cpu_threads == new_cfg.cpu_threads),
+                        "Stop mining before changing pool, worker or CPU threads"
                     );
-                } else {
-                    *cfg.lock().unwrap() = new_cfg.clone();
-                    if new_cfg.live_market_sync {
-                        let market_m = Arc::clone(&market);
-                        let out_m = Arc::clone(&out);
-                        thread::spawn(move || {
-                            let (dialect, _, _) = new_cfg.effective_endpoint();
-                            let addr = current_wallet_summary().map(|w| w.address);
-                            let snap = fetch_snapshot(dialect, addr.as_deref());
-                            *market_m.lock().unwrap() = snap.clone();
-                            emit(&out_m, &DaemonEvent::Market { market: snap });
-                        });
+                    save_config(&cfg_path, &new_cfg)
+                });
+                match valid {
+                    Ok(()) => {
+                        *cfg.lock().unwrap() = new_cfg.clone();
+                        emit(
+                            &out,
+                            &DaemonEvent::ConfigUpdated {
+                                config: new_cfg.clone(),
+                            },
+                        );
+                        if !old.same_connection(&new_cfg)
+                            || old.live_market_sync != new_cfg.live_market_sync
+                        {
+                            *market.lock().unwrap() = MarketAndPoolSnapshot::default();
+                            emit(
+                                &out,
+                                &DaemonEvent::Market {
+                                    market: MarketAndPoolSnapshot::default(),
+                                },
+                            );
+                            let _ = refresh_market.try_send(());
+                        }
+                    }
+                    Err(e) => {
+                        emit(
+                            &out,
+                            &DaemonEvent::Error {
+                                message: e.to_string(),
+                            },
+                        );
+                        emit(&out, &DaemonEvent::ConfigUpdated { config: old });
                     }
                 }
             }
@@ -1028,8 +1190,15 @@ pub fn run_daemon() -> Result<()> {
                 Ok(w) => {
                     let p = default_wallet_path();
                     if let Err(e) = write_wallet_file(&p, &w) {
-                        emit(&out, &DaemonEvent::Error { message: e.to_string() });
+                        emit(
+                            &out,
+                            &DaemonEvent::Error {
+                                message: e.to_string(),
+                            },
+                        );
                     } else {
+                        *market.lock().unwrap() = MarketAndPoolSnapshot::default();
+                        let _ = refresh_market.try_send(());
                         emit(
                             &out,
                             &DaemonEvent::WalletUpdated {
@@ -1039,15 +1208,27 @@ pub fn run_daemon() -> Result<()> {
                         );
                     }
                 }
-                Err(e) => emit(&out, &DaemonEvent::Error { message: e.to_string() }),
+                Err(e) => emit(
+                    &out,
+                    &DaemonEvent::Error {
+                        message: e.to_string(),
+                    },
+                ),
             },
             DaemonCommand::WalletImportKey { private_key_hex } => {
                 match wallet_from_private_key_hex(&private_key_hex) {
                     Ok(w) => {
                         let p = default_wallet_path();
                         if let Err(e) = write_wallet_file(&p, &w) {
-                            emit(&out, &DaemonEvent::Error { message: e.to_string() });
+                            emit(
+                                &out,
+                                &DaemonEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            );
                         } else {
+                            *market.lock().unwrap() = MarketAndPoolSnapshot::default();
+                            let _ = refresh_market.try_send(());
                             emit(
                                 &out,
                                 &DaemonEvent::WalletUpdated {
@@ -1057,7 +1238,12 @@ pub fn run_daemon() -> Result<()> {
                             );
                         }
                     }
-                    Err(e) => emit(&out, &DaemonEvent::Error { message: e.to_string() }),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
                 }
             }
             DaemonCommand::WalletImportFile { path } => {
@@ -1065,8 +1251,15 @@ pub fn run_daemon() -> Result<()> {
                     Ok(w) => {
                         let p = default_wallet_path();
                         if let Err(e) = write_wallet_file(&p, &w) {
-                            emit(&out, &DaemonEvent::Error { message: e.to_string() });
+                            emit(
+                                &out,
+                                &DaemonEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            );
                         } else {
+                            *market.lock().unwrap() = MarketAndPoolSnapshot::default();
+                            let _ = refresh_market.try_send(());
                             emit(
                                 &out,
                                 &DaemonEvent::WalletUpdated {
@@ -1076,7 +1269,12 @@ pub fn run_daemon() -> Result<()> {
                             );
                         }
                     }
-                    Err(e) => emit(&out, &DaemonEvent::Error { message: e.to_string() }),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
                 }
             }
             DaemonCommand::WalletConnectAddress { address } => {
@@ -1084,8 +1282,15 @@ pub fn run_daemon() -> Result<()> {
                     Ok(w) => {
                         let p = default_wallet_path();
                         if let Err(e) = write_wallet_file(&p, &w) {
-                            emit(&out, &DaemonEvent::Error { message: e.to_string() });
+                            emit(
+                                &out,
+                                &DaemonEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            );
                         } else {
+                            *market.lock().unwrap() = MarketAndPoolSnapshot::default();
+                            let _ = refresh_market.try_send(());
                             emit(
                                 &out,
                                 &DaemonEvent::WalletUpdated {
@@ -1095,7 +1300,55 @@ pub fn run_daemon() -> Result<()> {
                             );
                         }
                     }
-                    Err(e) => emit(&out, &DaemonEvent::Error { message: e.to_string() }),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                }
+            }
+            DaemonCommand::WalletAcknowledgeBackup => {
+                let result = load_and_verify_wallet(&default_wallet_path()).and_then(|mut w| {
+                    w.backup_confirmed = true;
+                    write_wallet_file(&default_wallet_path(), &w)
+                });
+                match result {
+                    Ok(()) => emit(
+                        &out,
+                        &DaemonEvent::WalletUpdated {
+                            wallet: current_wallet_summary(),
+                            revealed_private_key: None,
+                        },
+                    ),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
+                }
+            }
+            DaemonCommand::WalletExport { path } => {
+                let result = load_and_verify_wallet(&default_wallet_path()).and_then(|w| {
+                    let dest = PathBuf::from(&path);
+                    anyhow::ensure!(
+                        dest != default_wallet_path(),
+                        "Choose a separate backup location"
+                    );
+                    crate::storage::atomic_write(
+                        &dest,
+                        serde_json::to_string_pretty(&w)?.as_bytes(),
+                    )
+                });
+                match result {
+                    Ok(()) => emit(&out, &DaemonEvent::WalletExported { path }),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
                 }
             }
             DaemonCommand::WalletRevealKey => {
@@ -1108,46 +1361,87 @@ pub fn run_daemon() -> Result<()> {
                             revealed_private_key: w.private_key_hex,
                         },
                     ),
-                    Err(e) => emit(&out, &DaemonEvent::Error { message: e.to_string() }),
+                    Err(e) => emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    ),
                 }
             }
             DaemonCommand::RefreshMarket => {
-                let cur_cfg = cfg.lock().unwrap().clone();
-                let market_m = Arc::clone(&market);
-                let out_m = Arc::clone(&out);
-                thread::spawn(move || {
-                    let (dialect, _, _) = cur_cfg.effective_endpoint();
-                    let addr = current_wallet_summary().map(|w| w.address);
-                    let snap = fetch_snapshot(dialect, addr.as_deref());
-                    *market_m.lock().unwrap() = snap.clone();
-                    emit(&out_m, &DaemonEvent::Market { market: snap });
-                });
+                let _ = refresh_market.try_send(());
             }
             DaemonCommand::SelfTest => {
-                let out_s = Arc::clone(&out);
-                thread::spawn(move || match run_self_test() {
-                    Ok(report) => emit(&out_s, &DaemonEvent::SelfTestResult { report }),
-                    Err(e) => emit(&out_s, &DaemonEvent::Error { message: e.to_string() }),
-                });
-            }
-            DaemonCommand::Benchmark { seconds } => {
-                if is_mining.load(Ordering::SeqCst) {
+                if is_mining.load(Ordering::SeqCst) || diagnostics_busy.swap(true, Ordering::SeqCst)
+                {
                     emit(
                         &out,
                         &DaemonEvent::Error {
-                            message: "Stop mining before running benchmark".into(),
+                            message: "Stop mining and wait for diagnostics to finish".into(),
                         },
                     );
-                } else {
-                    let out_b = Arc::clone(&out);
-                    let secs = seconds.unwrap_or(10.0).clamp(3.0, 120.0);
-                    thread::spawn(move || match run_benchmark(secs) {
-                        Ok(report) => emit(&out_b, &DaemonEvent::BenchmarkResult { report }),
-                        Err(e) => emit(&out_b, &DaemonEvent::Error { message: e.to_string() }),
-                    });
+                    continue;
                 }
+                let out_s = Arc::clone(&out);
+                let busy = Arc::clone(&diagnostics_busy);
+                thread::spawn(move || {
+                    let event = match run_self_test() {
+                        Ok(report) => DaemonEvent::SelfTestResult { report },
+                        Err(e) => DaemonEvent::DiagnosticError {
+                            operation: "self_test".into(),
+                            message: e.to_string(),
+                        },
+                    };
+                    busy.store(false, Ordering::SeqCst);
+                    emit(&out_s, &event);
+                });
+            }
+            DaemonCommand::Benchmark { seconds } => {
+                let secs = seconds.unwrap_or(10.0);
+                if !secs.is_finite() || !(3.0..=120.0).contains(&secs) {
+                    emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: "Benchmark duration must be 3–120 seconds".into(),
+                        },
+                    );
+                    continue;
+                }
+                if is_mining.load(Ordering::SeqCst) || diagnostics_busy.swap(true, Ordering::SeqCst)
+                {
+                    emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: "Stop mining and wait for diagnostics to finish".into(),
+                        },
+                    );
+                    continue;
+                }
+                let out_b = Arc::clone(&out);
+                let busy = Arc::clone(&diagnostics_busy);
+                thread::spawn(move || {
+                    let event = match run_benchmark(secs) {
+                        Ok(report) => DaemonEvent::BenchmarkResult { report },
+                        Err(e) => DaemonEvent::DiagnosticError {
+                            operation: "benchmark".into(),
+                            message: e.to_string(),
+                        },
+                    };
+                    busy.store(false, Ordering::SeqCst);
+                    emit(&out_b, &event);
+                });
             }
             DaemonCommand::Start => {
+                if diagnostics_busy.load(Ordering::SeqCst) {
+                    emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: "Wait for diagnostics to finish before mining".into(),
+                        },
+                    );
+                    continue;
+                }
                 if is_mining.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -1161,7 +1455,21 @@ pub fn run_daemon() -> Result<()> {
                     continue;
                 };
                 if let Err(e) = validate_payout_address(&w.address) {
-                    emit(&out, &DaemonEvent::Error { message: e.to_string() });
+                    emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: e.to_string(),
+                        },
+                    );
+                    continue;
+                }
+                if w.needs_backup {
+                    emit(
+                        &out,
+                        &DaemonEvent::Error {
+                            message: "Back up the new wallet and confirm before mining".into(),
+                        },
+                    );
                     continue;
                 }
 
@@ -1169,23 +1477,40 @@ pub fn run_daemon() -> Result<()> {
                 mining_stop = Some(Arc::clone(&stop));
                 is_mining.store(true, Ordering::SeqCst);
 
-                let cur_cfg = cfg.lock().unwrap().clone();
+                let session_cfg = Arc::clone(&cfg);
                 let market_m = Arc::clone(&market);
                 let out_m = Arc::clone(&out);
                 let is_mining_m = Arc::clone(&is_mining);
+                if let Some(h) = mining_handle.take() {
+                    let _ = h.join();
+                }
                 mining_handle = Some(thread::spawn(move || {
-                    if let Err(e) = run_mining_session(
-                        cur_cfg,
+                    let stopped = Arc::clone(&stop);
+                    let result = run_mining_session(
+                        session_cfg,
                         w.address,
                         stop,
                         market_m,
                         Some(out_m.clone()),
                         None,
                         None,
-                    ) {
-                        emit(&out_m, &DaemonEvent::Error { message: e.to_string() });
-                    }
+                    );
                     is_mining_m.store(false, Ordering::SeqCst);
+                    let (state, detail) = match result {
+                        Err(e) if !stopped.load(Ordering::SeqCst) => ("error", e.to_string()),
+                        _ => ("stopped", String::new()),
+                    };
+                    emit(
+                        &out_m,
+                        &DaemonEvent::Status {
+                            state: state.into(),
+                            detail,
+                            job_id: None,
+                            height: None,
+                            cert_version: None,
+                            uptime_s: 0,
+                        },
+                    );
                 }));
             }
             DaemonCommand::Stop => {

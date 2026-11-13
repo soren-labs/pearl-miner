@@ -2,11 +2,13 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
 
 permissions:
   contents: write
+
+env:
+  MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
 
 jobs:
   package-macos:
@@ -18,16 +20,52 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build PearlMiner.app, DMG, and ZIP
+      - name: Test core
+        run: cargo test --locked -p pearl-miner-core
+
+      - name: Import Developer ID and configure notarization
+        if: env.MACOS_CERTIFICATE_P12_BASE64 != ''
+        env:
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ./scripts/build_app.sh "$VERSION"
+          set -euo pipefail
+          test -n "$SIGN_IDENTITY"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_TEAM_ID"
+          test -n "$APPLE_APP_PASSWORD"
+          CERT_FILE="$RUNNER_TEMP/pearl-signing.p12"
+          KEYCHAIN="$RUNNER_TEMP/pearl-signing.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -hex 24)"
+          python3 -c 'import os,base64,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"pearl-signing.p12").write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_P12_BASE64"]))'
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security import "$CERT_FILE" -P "$CERT_PASSWORD" -t cert -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+          security default-keychain -d user -s "$KEYCHAIN"
+          xcrun notarytool store-credentials pearl-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$KEYCHAIN"
+          printf 'PEARL_CODESIGN_IDENTITY=%s\nPEARL_NOTARY_PROFILE=pearl-notary\n' "$SIGN_IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$CERT_FILE"
+
+      - name: Build PearlMiner.app, DMG, and ZIP
+        run: ./scripts/build_app.sh "${GITHUB_REF_NAME#v}"
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ env.MACOS_CERTIFICATE_P12_BASE64 == '' }}
           files: |
             dist/PearlMiner-macOS-arm64.dmg
             dist/PearlMiner-macOS-arm64.zip
             dist/SHA256SUMS.txt
+
+      - name: Remove temporary signing keychain
+        if: always() && env.MACOS_CERTIFICATE_P12_BASE64 != ''
+        run: security delete-keychain "$RUNNER_TEMP/pearl-signing.keychain-db" || true
