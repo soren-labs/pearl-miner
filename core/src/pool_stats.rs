@@ -125,8 +125,8 @@ mod tests {
                 "paymentThreshold": 500000000
             }}),
         );
-        assert_eq!(s.pool_pending_prl, Some(0.025000000));
-        assert_eq!(s.pool_confirmed_prl, Some(0.075000000));
+        assert_eq!(s.pool_pending_prl, Some(0.25));
+        assert_eq!(s.pool_confirmed_prl, Some(0.75));
         assert_eq!(s.pool_paid_prl, Some(0.0));
         assert_eq!(s.pool_threshold_prl, Some(5.0));
         let total = s.pool_pending_prl.unwrap() + s.pool_confirmed_prl.unwrap();
