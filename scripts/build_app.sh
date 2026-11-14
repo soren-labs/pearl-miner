@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.1.2}"
+VERSION="${1:-0.1.3}"
 SIGN_IDENTITY="${PEARL_CODESIGN_IDENTITY:--}"
 NOTARY_PROFILE="${PEARL_NOTARY_PROFILE:-}"
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

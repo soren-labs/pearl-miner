@@ -48,6 +48,19 @@ pub fn apply_network_info(snap: &mut MarketAndPoolSnapshot, v: &Value) {
     snap.block_reward_prl = positive(v.get("block_reward"));
     snap.block_time_s = positive(v.get("block_time"));
 }
+
+pub fn apply_luckypool_balance(snap: &mut MarketAndPoolSnapshot, v: &Value) {
+    if let Some(stats) = v.get("stats") {
+        let atomic = |key: &str| stats.get(key).and_then(number).map(|n| n / 1e8);
+        snap.pool_pending_prl = atomic("locked");
+        // LuckyPool names matured, unpaid funds `unlocked`. `balance` is a
+        // legacy fallback; absence must remain unknown rather than imply zero.
+        snap.pool_confirmed_prl = atomic("unlocked").or_else(|| atomic("balance"));
+        snap.pool_paid_prl = atomic("paid");
+        snap.pool_threshold_prl = atomic("paymentThreshold");
+    }
+}
+
 pub fn fetch_snapshot(cfg: &MinerConfig, address: Option<&str>) -> MarketAndPoolSnapshot {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(4))
@@ -79,12 +92,7 @@ pub fn fetch_snapshot(cfg: &MinerConfig, address: Option<&str>) -> MarketAndPool
                 if let Some(v) = get(&format!(
                     "https://pearl.luckypool.io/api/stats_address?address={addr}"
                 )) {
-                    if let Some(stats) = v.get("stats") {
-                        let atomic = |key: &str| stats.get(key).and_then(number).map(|n| n / 1e8);
-                        snap.pool_pending_prl = atomic("locked");
-                        snap.pool_confirmed_prl = atomic("balance");
-                        snap.pool_paid_prl = atomic("paid");
-                    }
+                    apply_luckypool_balance(&mut snap, &v);
                 }
             }
             PoolKind::KryptexEu | PoolKind::KryptexUs => {
@@ -107,6 +115,43 @@ pub fn fetch_snapshot(cfg: &MinerConfig, address: Option<&str>) -> MarketAndPool
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn luckypool_matured_funds_are_not_lost_when_balance_field_is_absent() {
+        let mut s = MarketAndPoolSnapshot::default();
+        apply_luckypool_balance(
+            &mut s,
+            &json!({"stats": {
+                "locked": 25000000, "unlocked": "75000000", "paid": 0,
+                "paymentThreshold": 500000000
+            }}),
+        );
+        assert_eq!(s.pool_pending_prl, Some(0.25));
+        assert_eq!(s.pool_confirmed_prl, Some(0.75));
+        assert_eq!(s.pool_paid_prl, Some(0.0));
+        assert_eq!(s.pool_threshold_prl, Some(5.0));
+        let total = s.pool_pending_prl.unwrap() + s.pool_confirmed_prl.unwrap();
+        assert!((total - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn luckypool_legacy_balance_and_zero_unlocked_are_handled_without_guessing() {
+        let mut s = MarketAndPoolSnapshot::default();
+        apply_luckypool_balance(&mut s, &json!({"stats": {"balance": "100000000"}}));
+        assert_eq!(s.pool_confirmed_prl, Some(1.0));
+        assert!(s.pool_pending_prl.is_none());
+        apply_luckypool_balance(
+            &mut s,
+            &json!({"stats": {"unlocked": 0, "balance": "100000000"}}),
+        );
+        assert_eq!(s.pool_confirmed_prl, Some(0.0));
+        apply_luckypool_balance(
+            &mut s,
+            &json!({"stats": {"unlocked": "NaN", "locked": -1, "paid": null}}),
+        );
+        assert!(s.pool_confirmed_prl.is_none());
+        assert!(s.pool_pending_prl.is_none());
+        assert!(s.pool_paid_prl.is_none());
+    }
     #[test]
     fn real_kryptex_schema_uses_hashrate_not_difficulty() {
         let mut s = MarketAndPoolSnapshot::default();
