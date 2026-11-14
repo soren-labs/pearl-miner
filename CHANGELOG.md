@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 — LuckyPool matured balance
+
+- Read matured, unpaid LuckyPool funds from `stats.unlocked`; retain `stats.balance` only as a legacy fallback. Previously, Confirmed showed unknown even though matured funds existed, making the Pending amount look like the entire reward.
+- Read the account's `paymentThreshold` in Pearl atomic units.
+- Add regression coverage for real response field names, string/numeric values, zero matured balance, missing fields and malformed responses. All validation and packaging remain local only.
+
 ## 0.1.2 — Portable Metal runtime detection
 
 - Keep M6 tensor-kernel detection in binaries built with older SDKs. Metal 4.1 is gated by runtime macOS/GPU support rather than preprocessed out by the build SDK; ABI values are checked against newer SDK headers. Older Macs retain the scalar fallback.

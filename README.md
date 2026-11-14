@@ -124,7 +124,7 @@ python3 scripts/smoke_test.py
 
 ## Developer ID signing and notarization
 
-Local signing uses `PEARL_CODESIGN_IDENTITY` (a Developer ID Application identity in the keychain) and `PEARL_NOTARY_PROFILE` (credentials previously stored by `xcrun notarytool store-credentials`). With both configured, `./scripts/build_app.sh 0.1.2` signs both executables with hardened runtime, notarizes and staples the app and DMG, then creates final checksums. Notarization failures stop packaging.
+Local signing uses `PEARL_CODESIGN_IDENTITY` (a Developer ID Application identity in the keychain) and `PEARL_NOTARY_PROFILE` (credentials previously stored by `xcrun notarytool store-credentials`). With both configured, `./scripts/build_app.sh 0.1.3` signs both executables with hardened runtime, notarizes and staples the app and DMG, then creates final checksums. Notarization failures stop packaging.
 
 GitHub-hosted build/test/release workflows are removed and disabled. Keep signing/notarization credentials in your local keychain. Run `./scripts/ci_local.sh` locally, then upload the resulting DMG, ZIP and `SHA256SUMS.txt` with `gh release create` or the GitHub release UI. Publishing uploads prebuilt files; it does not execute the miner on GitHub. Unsigned artifacts must be marked **prerelease**. See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
 
